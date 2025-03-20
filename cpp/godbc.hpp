@@ -1,11 +1,16 @@
-#ifndef GODBC_HPP
-#define GODBC_HPP
+#pragma once
 
 #include <string>
 #include <memory>
 #include <stdexcept>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
-#include "../bridge/bridge.h"
+#include <sstream>
+
+extern "C" {
+#include "bridge/bridge.h"
+}
 
 namespace godbc {
 
@@ -15,29 +20,75 @@ public:
     explicit Error(const std::string& message) : std::runtime_error(message) {}
 };
 
-class ResultSet;
-class Connection;
-class Transaction;
-class PreparedStatement;
+class ResultSet {
+private:
+    godbc_handle handle_;
 
-class ConnectionPool {
 public:
-    static Connection getConnection(const std::string& connStr, 
-                                  int minConns = 1, int maxConns = 10,
-                                  int connTimeoutMs = 30000, 
-                                  int retryDelayMs = 1000, 
-                                  int retryAttempts = 3);
+    explicit ResultSet(godbc_handle handle) : handle_(handle) {}
+    ~ResultSet() noexcept(false) {
+        if (handle_) {
+            char* errPtr = nullptr;
+            GodbcCloseRows(handle_, &errPtr);
+            if (errPtr) {
+                std::string err(errPtr);
+                free(errPtr);
+                throw Error(err);
+            }
+        }
+    }
+
+    bool next() const {
+        char* errPtr = nullptr;
+        int result = GodbcNext(handle_, &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
+            throw Error(err);
+        }
+        return result == 1;
+    }
+
+    void scan(std::vector<std::string>& values) {
+        char** row = nullptr;
+        char* errPtr = nullptr;
+        GodbcScan(handle_, &row, static_cast<int>(values.size()), &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
+            throw Error(err);
+        }
+
+        values.clear();
+        values.reserve(static_cast<size_t>(values.size()));
+        for (int i = 0; i < static_cast<int>(values.size()); ++i) {
+            values.emplace_back(row[i]);
+            free(row[i]);
+        }
+        free(row);
+    }
 };
 
 class PreparedStatement {
+private:
+    godbc_handle handle_;
+
+    template<typename T>
+    static std::string toString(const T& value) {
+        std::ostringstream ss;
+        ss << value;
+        return ss.str();
+    }
+
 public:
+    explicit PreparedStatement(godbc_handle handle) : handle_(handle) {}
     ~PreparedStatement() noexcept(false) {
         if (handle_) {
-            char* error = nullptr;
-            GodbcClosePrepared(handle_, &error);
-            if (error) {
-                std::string err(error);
-                free(error);
+            char* errPtr = nullptr;
+            GodbcClosePrepared(handle_, &errPtr);
+            if (errPtr) {
+                std::string err(errPtr);
+                free(errPtr);
                 throw Error(err);
             }
         }
@@ -47,45 +98,32 @@ public:
     void execute(const Args&... args) {
         std::vector<std::string> params;
         params.reserve(sizeof...(args));
-        int dummy[] = { (params.push_back(toString(args)), 0)... };
-        (void)dummy; // Suppress unused variable warning
-        
+        (params.push_back(toString(args)), ...);
+
         std::vector<char*> cParams;
         cParams.reserve(params.size());
         for (const auto& p : params) {
             cParams.push_back(const_cast<char*>(p.c_str()));
         }
 
-        char* error = nullptr;
-        GodbcExecutePrepared(handle_, cParams.data(), static_cast<int>(cParams.size()), &error);
-        if (error) {
-            std::string err(error);
-            free(error);
+        char* errPtr = nullptr;
+        GodbcExecutePrepared(handle_, cParams.data(), static_cast<int>(cParams.size()), &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
             throw Error(err);
         }
-    }
-
-private:
-    friend class Connection;
-    PreparedStatement(godbc_handle handle) : handle_(handle) {}
-    godbc_handle handle_;
-
-    template<typename T>
-    static std::string toString(const T& value) {
-        return std::to_string(value);
-    }
-
-    static std::string toString(const std::string& value) {
-        return value;
-    }
-
-    static std::string toString(const char* value) {
-        return std::string(value);
     }
 };
 
 class Transaction {
+private:
+    godbc_handle handle_;
+    bool committed_;
+    bool rolledBack_;
+
 public:
+    explicit Transaction(godbc_handle handle) : handle_(handle), committed_(false), rolledBack_(false) {}
     ~Transaction() noexcept(false) {
         if (!committed_ && !rolledBack_) {
             rollback();
@@ -93,21 +131,21 @@ public:
     }
 
     void execute(const std::string& query) {
-        char* error = nullptr;
-        GodbcExecuteInTransaction(handle_, query.c_str(), &error);
-        if (error) {
-            std::string err(error);
-            free(error);
+        char* errPtr = nullptr;
+        GodbcExecuteInTransaction(handle_, query.c_str(), &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
             throw Error(err);
         }
     }
 
     void commit() {
-        char* error = nullptr;
-        GodbcCommit(handle_, &error);
-        if (error) {
-            std::string err(error);
-            free(error);
+        char* errPtr = nullptr;
+        GodbcCommit(handle_, &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
             throw Error(err);
         }
         committed_ = true;
@@ -115,160 +153,137 @@ public:
 
     void rollback() {
         if (!rolledBack_) {
-            char* error = nullptr;
-            GodbcRollback(handle_, &error);
-            if (error) {
-                std::string err(error);
-                free(error);
+            char* errPtr = nullptr;
+            GodbcRollback(handle_, &errPtr);
+            if (errPtr) {
+                std::string err(errPtr);
+                free(errPtr);
                 throw Error(err);
             }
             rolledBack_ = true;
         }
     }
-
-private:
-    friend class Connection;
-    Transaction(godbc_handle handle) : handle_(handle), committed_(false), rolledBack_(false) {}
-    godbc_handle handle_;
-    bool committed_;
-    bool rolledBack_;
 };
 
 class Connection {
+private:
+    godbc_handle handle_;
+
 public:
+    explicit Connection(godbc_handle handle) : handle_(handle) {}
     ~Connection() noexcept(false) {
         if (handle_) {
-            char* error = nullptr;
-            GodbcClose(handle_, &error);
-            if (error) {
-                std::string err(error);
-                free(error);
+            char* errPtr = nullptr;
+            GodbcClose(handle_, &errPtr);
+            if (errPtr) {
+                std::string err(errPtr);
+                free(errPtr);
                 throw Error(err);
             }
         }
     }
 
     void execute(const std::string& query) const {
-        char* error = nullptr;
-        GodbcExecute(handle_, query.c_str(), &error);
-        if (error) {
-            std::string err(error);
-            free(error);
+        char* errPtr = nullptr;
+        GodbcExecute(handle_, query.c_str(), &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
             throw Error(err);
         }
     }
 
-    std::unique_ptr<ResultSet> query(const std::string& query) const;
+    ResultSet query(const std::string& query) const {
+        char* errPtr = nullptr;
+        godbc_handle handle = GodbcQuery(handle_, query.c_str(), &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
+            throw Error(err);
+        }
+        return ResultSet(handle);
+    }
 
     Transaction beginTransaction() const {
-        char* error = nullptr;
-        godbc_handle txHandle = GodbcBeginTransaction(handle_, &error);
-        if (error) {
-            std::string err(error);
-            free(error);
+        char* errPtr = nullptr;
+        godbc_handle txHandle = GodbcBeginTransaction(handle_, &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
             throw Error(err);
         }
         return Transaction(txHandle);
     }
 
     PreparedStatement prepare(const std::string& query) const {
-        char* error = nullptr;
-        godbc_handle stmtHandle = GodbcPrepare(handle_, query.c_str(), &error);
-        if (error) {
-            std::string err(error);
-            free(error);
+        char* errPtr = nullptr;
+        godbc_handle stmtHandle = GodbcPrepare(handle_, query.c_str(), &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
             throw Error(err);
         }
         return PreparedStatement(stmtHandle);
     }
-
-private:
-    friend class ConnectionPool;
-    Connection(godbc_handle handle) : handle_(handle) {}
-    godbc_handle handle_;
-    friend class ResultSet;
 };
 
-Connection ConnectionPool::getConnection(const std::string& connStr, 
-                                      int minConns, int maxConns,
-                                      int connTimeoutMs, 
-                                      int retryDelayMs, 
-                                      int retryAttempts) {
-    char* error = nullptr;
-    godbc_handle handle = GodbcConnect(connStr.c_str(), minConns, maxConns, 
-                                     connTimeoutMs, retryDelayMs, retryAttempts,
-                                     &error);
-    if (error) {
-        std::string err(error);
-        free(error);
-        throw Error(err);
-    }
-    return Connection(handle);
-}
+class ConnectionPool {
+private:
+    std::string connStr_;
+    int minConns_;
+    int maxConns_;
+    int connTimeoutMs_;
+    int retryDelayMs_;
+    int retryAttempts_;
+    int networkRetryDelaySecs_;
+    bool verboseLogging_;
+    godbc_handle handle_;
 
-class ResultSet {
 public:
-    friend class Connection;
+    ConnectionPool(const std::string& connStr, int minConns = 1, int maxConns = 10,
+                  int connTimeoutMs = 30000, int retryDelayMs = 1000, int retryAttempts = 3,
+                  int networkRetryDelaySecs = 1, bool verboseLogging = false)
+        : connStr_(connStr), minConns_(minConns), maxConns_(maxConns),
+          connTimeoutMs_(connTimeoutMs), retryDelayMs_(retryDelayMs),
+          retryAttempts_(retryAttempts), networkRetryDelaySecs_(networkRetryDelaySecs),
+          verboseLogging_(verboseLogging), handle_(0) {
+        char* err = nullptr;
+        handle_ = GodbcConnect(connStr_.c_str(), minConns_, maxConns_,
+                             connTimeoutMs_, retryDelayMs_, retryAttempts_,
+                             networkRetryDelaySecs_, verboseLogging_ ? 1 : 0, &err);
+        if (err) {
+            std::string error(err);
+            free(err);
+            throw std::runtime_error("Failed to connect: " + error);
+        }
+    }
 
-    ~ResultSet() noexcept(false) {
+    ~ConnectionPool() {
         if (handle_) {
-            char* error = nullptr;
-            GodbcCloseRows(handle_, &error);
-            if (error) {
-                std::string err(error);
-                free(error);
-                throw Error(err);
+            char* err = nullptr;
+            GodbcClose(handle_, &err);
+            if (err) {
+                free(err);
             }
         }
     }
 
-    bool next() const {
-        char* error = nullptr;
-        int result = GodbcNext(handle_, &error);
-        if (error) {
-            std::string err(error);
-            free(error);
-            throw Error(err);
+    static Connection getConnection(const std::string& connStr, 
+                                    int minConns = 1, int maxConns = 10,
+                                    int connTimeoutMs = 30000, int retryDelayMs = 1000,
+                                    int retryAttempts = 3, int networkRetryDelaySecs = 1,
+                                    bool verboseLogging = false) {
+        char* err = nullptr;
+        godbc_handle handle = GodbcConnect(connStr.c_str(), minConns, maxConns,
+                                         connTimeoutMs, retryDelayMs, retryAttempts,
+                                         networkRetryDelaySecs, verboseLogging ? 1 : 0, &err);
+        if (err) {
+            std::string error(err);
+            free(err);
+            throw std::runtime_error("Failed to connect: " + error);
         }
-        return result == 1;
+        return Connection(handle);
     }
-
-    std::vector<std::string> getRow(int columnCount) const {
-        char** values = nullptr;
-        char* error = nullptr;
-        GodbcScan(handle_, &values, columnCount, &error);
-        if (error) {
-            std::string err(error);
-            free(error);
-            throw Error(err);
-        }
-
-        std::vector<std::string> result;
-        result.reserve(columnCount);
-        for (int i = 0; i < columnCount; ++i) {
-            result.emplace_back(values[i]);
-            free(values[i]);
-        }
-        free(values);
-        return result;
-    }
-
-private:
-    ResultSet(godbc_handle handle) : handle_(handle) {}
-    godbc_handle handle_;
 };
 
-std::unique_ptr<ResultSet> Connection::query(const std::string& query) const {
-    char* error = nullptr;
-    godbc_handle handle = GodbcQuery(handle_, query.c_str(), &error);
-    if (error) {
-        std::string err(error);
-        free(error);
-        throw Error(err);
-    }
-    return std::unique_ptr<ResultSet>(new ResultSet(handle));
-}
-
 } // namespace godbc
-
-#endif // GODBC_HPP

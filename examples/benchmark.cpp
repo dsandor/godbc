@@ -20,6 +20,7 @@ struct BenchmarkConfig {
     bool useWriteQueries;  // New: whether to use write queries that need transactions
     int reportIntervalMs;
     bool verboseLogging;  // New: whether to show verbose logs
+    int networkRetryAttempts;  // New: number of network failure retries
 };
 
 struct Metrics {
@@ -44,6 +45,7 @@ void printUsage(const char* program) {
               << "  -w, --write-queries        Use write queries that need transactions (default: false)\n"
               << "  -r, --report <int>         Report interval in ms (default: 1000)\n"
               << "  -v, --verbose             Enable verbose logging (default: false)\n"
+              << "  -a, --retry-attempts <int> Number of network failure retries (default: 3)\n"
               << "  -h, --help                 Show this help message\n";
 }
 
@@ -56,7 +58,8 @@ BenchmarkConfig parseArgs(int argc, char* argv[]) {
         .useTransactions = false,
         .useWriteQueries = false,
         .reportIntervalMs = 1000,
-        .verboseLogging = false
+        .verboseLogging = false,
+        .networkRetryAttempts = 3
     };
 
     for (int i = 1; i < argc; i++) {
@@ -80,6 +83,8 @@ BenchmarkConfig parseArgs(int argc, char* argv[]) {
             if (++i < argc) config.reportIntervalMs = std::stoi(argv[i]);
         } else if (arg == "-v" || arg == "--verbose") {
             config.verboseLogging = true;
+        } else if (arg == "-a" || arg == "--retry-attempts") {
+            if (++i < argc) config.networkRetryAttempts = std::stoi(argv[i]);
         }
     }
 
@@ -112,7 +117,7 @@ void runQueries(const BenchmarkConfig& config, int threadId, int queriesPerThrea
                 Metrics& metrics) {
     try {
         auto connStart = std::chrono::high_resolution_clock::now();
-        auto conn = godbc::ConnectionPool::getConnection(config.connStr);
+        auto conn = godbc::ConnectionPool::getConnection(config.connStr, 1, 10, 30000, 1000, config.networkRetryAttempts, config.verboseLogging ? 1 : 0);
         auto connEnd = std::chrono::high_resolution_clock::now();
         auto connDuration = std::chrono::duration_cast<std::chrono::milliseconds>(connEnd - connStart);
         metrics.totalConnectionTimeMs += connDuration.count();
@@ -198,17 +203,23 @@ void runQueries(const BenchmarkConfig& config, int threadId, int queriesPerThrea
                 std::cerr << "\nThread " << threadId << " query " << i << " failed: " << e.what() << std::endl;
                 metrics.errorCount++;
                 
-                // If connection error, try to get a new connection
-                if (std::string(e.what()).find("connection") != std::string::npos) {
+                // Check for connection-related errors
+                std::string errorMsg = e.what();
+                if (errorMsg.find("connection") != std::string::npos || 
+                    errorMsg.find("invalid handle") != std::string::npos) {
                     try {
                         if (config.verboseLogging) {
                             std::cout << "\nThread " << threadId << " attempting to reconnect..." << std::endl;
                         }
-                        conn = godbc::ConnectionPool::getConnection(config.connStr);
+                        // Get a new connection
+                        conn = godbc::ConnectionPool::getConnection(config.connStr, 1, 10, 30000, 1000, config.networkRetryAttempts, config.verboseLogging ? 1 : 0);
                         metrics.retryCount++;
                         if (config.verboseLogging) {
                             std::cout << "\nThread " << threadId << " reconnected successfully" << std::endl;
                         }
+                        // Retry the query
+                        i--;  // Decrement i to retry the failed query
+                        continue;
                     } catch (const std::exception& connErr) {
                         std::cerr << "\nThread " << threadId << " failed to reconnect: " << connErr.what() << std::endl;
                     }
@@ -237,7 +248,8 @@ int main(int argc, char* argv[]) {
                   << "Using transactions: " << (config.useTransactions ? "yes" : "no") << "\n"
                   << "Using write queries: " << (config.useWriteQueries ? "yes" : "no") << "\n"
                   << "Report interval: " << config.reportIntervalMs << "ms\n"
-                  << "Verbose logging: " << (config.verboseLogging ? "yes" : "no") << "\n\n";
+                  << "Verbose logging: " << (config.verboseLogging ? "yes" : "no") << "\n"
+                  << "Network retry attempts: " << config.networkRetryAttempts << "\n\n";
         
         std::vector<std::thread> threads;
         Metrics metrics;

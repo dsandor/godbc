@@ -34,6 +34,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -46,14 +47,16 @@ type Handle uint64
 
 // Pool represents a connection pool
 type Pool struct {
-	db            *sql.DB
-	minConns      int
-	maxConns      int
-	connTimeout   time.Duration
-	retryDelay    time.Duration
-	retryAttempts int
-	mu            sync.RWMutex
-	activeConns   int
+	db                *sql.DB
+	minConns          int
+	maxConns          int
+	connTimeout       time.Duration
+	retryDelay        time.Duration
+	retryAttempts     int
+	networkRetryDelay time.Duration
+	mu                sync.RWMutex
+	activeConns       int
+	verboseLogging    bool
 }
 
 var (
@@ -84,22 +87,64 @@ func (p *Pool) preallocateConnections() error {
 // getConnectionWithRetry attempts to get a connection with retries
 func (p *Pool) getConnectionWithRetry() (*sql.Conn, error) {
 	var lastErr error
-	for attempt := 0; attempt <= p.retryAttempts; attempt++ {
+	for attempt := 0; attempt < p.retryAttempts; attempt++ {
 		if attempt > 0 {
-			time.Sleep(p.retryDelay)
+			// Check if the error is a network-related error
+			if isNetworkError(lastErr) {
+				if p.verboseLogging {
+					fmt.Printf("Network error detected, waiting %v before retry: %v\n", p.networkRetryDelay, lastErr)
+				}
+				time.Sleep(p.networkRetryDelay)
+			} else {
+				if p.verboseLogging {
+					fmt.Printf("Retry attempt %d/%d after connection failure: %v\n", attempt, p.retryAttempts, lastErr)
+				}
+				time.Sleep(p.retryDelay)
+			}
 		}
 
 		conn, err := p.db.Conn(context.Background())
 		if err == nil {
-			return conn, nil
+			// Test the connection with a simple query
+			err = conn.PingContext(context.Background())
+			if err == nil {
+				return conn, nil
+			}
+			conn.Close()
+			lastErr = err
+			continue
 		}
 		lastErr = err
 	}
-	return nil, fmt.Errorf("failed to get connection after %d attempts: %v", p.retryAttempts+1, lastErr)
+	return nil, fmt.Errorf("failed to get connection after %d attempts: %v", p.retryAttempts, lastErr)
+}
+
+// isNetworkError checks if the error is related to network connectivity
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	networkErrors := []string{
+		"connection refused",
+		"connection reset",
+		"network is unreachable",
+		"no route to host",
+		"i/o timeout",
+		"connection timed out",
+		"tcp connection rejected",
+		"dial tcp",
+	}
+	for _, netErr := range networkErrors {
+		if strings.Contains(strings.ToLower(errStr), netErr) {
+			return true
+		}
+	}
+	return false
 }
 
 //export GodbcConnect
-func GodbcConnect(connStr *C.char, minConns, maxConns C.int, connTimeoutMs, retryDelayMs, retryAttempts C.int) (C.godbc_handle_t, *C.char) {
+func GodbcConnect(connStr *C.char, minConns, maxConns C.int, connTimeoutMs, retryDelayMs, retryAttempts C.int, networkRetryDelaySecs C.int, verboseLogging C.int, errPtr **C.char) (C.godbc_handle_t, *C.char) {
 	goConnStr := C.GoString(connStr)
 
 	mu.Lock()
@@ -111,28 +156,34 @@ func GodbcConnect(connStr *C.char, minConns, maxConns C.int, connTimeoutMs, retr
 
 	db, err := sql.Open("mssql", goConnStr)
 	if err != nil {
-		errStr := C.CString(err.Error())
-		return 0, errStr
+		*errPtr = C.CString(err.Error())
+		return 0, nil
 	}
 
 	pool := &Pool{
-		db:            db,
-		minConns:      int(minConns),
-		maxConns:      int(maxConns),
-		connTimeout:   time.Duration(connTimeoutMs) * time.Millisecond,
-		retryDelay:    time.Duration(retryDelayMs) * time.Millisecond,
-		retryAttempts: int(retryAttempts),
+		db:                db,
+		minConns:          int(minConns),
+		maxConns:          int(maxConns),
+		connTimeout:       time.Duration(connTimeoutMs) * time.Millisecond,
+		retryDelay:        time.Duration(retryDelayMs) * time.Millisecond,
+		retryAttempts:     int(retryAttempts),
+		networkRetryDelay: time.Duration(networkRetryDelaySecs) * time.Second,
+		verboseLogging:    verboseLogging != 0,
 	}
 
 	db.SetMaxOpenConns(pool.maxConns)
 	db.SetMaxIdleConns(pool.minConns)
 	db.SetConnMaxLifetime(pool.connTimeout)
 
-	// Preallocate connections
-	if err := pool.preallocateConnections(); err != nil {
-		db.Close()
-		errStr := C.CString(err.Error())
-		return 0, errStr
+	// Preallocate connections with retry
+	for i := 0; i < pool.minConns; i++ {
+		conn, err := pool.getConnectionWithRetry()
+		if err != nil {
+			db.Close()
+			*errPtr = C.CString(fmt.Sprintf("failed to preallocate connection %d: %v", i+1, err))
+			return 0, nil
+		}
+		conn.Close()
 	}
 
 	mu.Lock()
@@ -146,93 +197,130 @@ func GodbcConnect(connStr *C.char, minConns, maxConns C.int, connTimeoutMs, retr
 }
 
 //export GodbcClose
-func GodbcClose(h C.godbc_handle_t, error **C.char) {
+func GodbcClose(h C.godbc_handle_t, errPtr **C.char) {
 	mu.Lock()
 	defer mu.Unlock()
 
 	if pool, ok := handles[Handle(h)].(*Pool); ok {
 		if err := pool.db.Close(); err != nil {
-			*error = C.CString(err.Error())
+			*errPtr = C.CString(err.Error())
 			return
 		}
 		delete(handles, Handle(h))
-		*error = nil
+		*errPtr = nil
 	} else {
-		*error = C.CString("invalid handle")
+		*errPtr = C.CString("invalid handle")
 	}
 }
 
 //export GodbcExecute
-func GodbcExecute(h C.godbc_handle_t, query *C.char, error **C.char) *C.char {
+func GodbcExecute(h C.godbc_handle_t, query *C.char, errPtr **C.char) *C.char {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
 	pool, ok := obj.(*Pool)
 	if !ok {
-		*error = C.CString("Invalid connection handle")
+		*errPtr = C.CString("Invalid connection handle")
 		return nil
 	}
 
-	conn, err := pool.getConnectionWithRetry()
-	if err != nil {
-		*error = C.CString(err.Error())
-		return nil
-	}
-	defer conn.Close()
+	var lastErr error
+	for attempt := 0; attempt < pool.retryAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(pool.retryDelay)
+		}
 
-	_, err = conn.ExecContext(context.Background(), C.GoString(query))
-	if err != nil {
-		*error = C.CString(err.Error())
-		return nil
+		conn, err := pool.getConnectionWithRetry()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		defer conn.Close()
+
+		_, err = conn.ExecContext(context.Background(), C.GoString(query))
+		if err == nil {
+			return nil
+		}
+		lastErr = err
 	}
 
+	*errPtr = C.CString(fmt.Sprintf("failed to execute query after %d attempts: %v", pool.retryAttempts, lastErr))
 	return nil
 }
 
 //export GodbcQuery
-func GodbcQuery(h C.godbc_handle_t, query *C.char, error **C.char) C.godbc_handle_t {
+func GodbcQuery(h C.godbc_handle_t, query *C.char, errPtr **C.char) C.godbc_handle_t {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return 0
 	}
 
 	pool, ok := obj.(*Pool)
 	if !ok {
-		*error = C.CString("Invalid connection handle")
+		*errPtr = C.CString("Invalid connection handle")
 		return 0
 	}
 
-	conn, err := pool.getConnectionWithRetry()
-	if err != nil {
-		*error = C.CString(err.Error())
-		return 0
-	}
+	var lastErr error
+	var conn *sql.Conn
+	var rows *sql.Rows
 
-	rows, err := conn.QueryContext(context.Background(), C.GoString(query))
-	if err != nil {
+	for attempt := 0; attempt <= pool.retryAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(pool.retryDelay)
+			if pool.verboseLogging {
+				fmt.Printf("Retry attempt %d/%d after query failure: %v\n", attempt, pool.retryAttempts, lastErr)
+			}
+		}
+
+		// Get a new connection for each attempt
+		conn, err = pool.getConnectionWithRetry()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Execute the query
+		rows, err = conn.QueryContext(context.Background(), C.GoString(query))
+		if err == nil {
+			// Store the rows handle and return it
+			handle := storeHandle(rows)
+			if handle == 0 {
+				rows.Close()
+				conn.Close()
+				*errPtr = C.CString("Failed to store result set handle")
+				return 0
+			}
+			return handle
+		}
+
+		// Clean up on error
+		if rows != nil {
+			rows.Close()
+		}
 		conn.Close()
-		*error = C.CString(err.Error())
-		return 0
+		lastErr = err
 	}
 
-	return storeHandle(rows)
+	*errPtr = C.CString(fmt.Sprintf("failed to execute query after %d attempts: %v", pool.retryAttempts+1, lastErr))
+	return 0
 }
 
 //export GodbcNext
-func GodbcNext(h C.godbc_handle_t, error **C.char) C.int {
+func GodbcNext(h C.godbc_handle_t, errPtr **C.char) C.int {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return -1
 	}
 
 	rows, ok := obj.(*sql.Rows)
 	if !ok {
-		*error = C.CString("Invalid result set handle")
+		*errPtr = C.CString("Invalid result set handle")
 		return -1
 	}
 
@@ -241,7 +329,7 @@ func GodbcNext(h C.godbc_handle_t, error **C.char) C.int {
 	}
 
 	if err := rows.Err(); err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return -1
 	}
 
@@ -249,16 +337,16 @@ func GodbcNext(h C.godbc_handle_t, error **C.char) C.int {
 }
 
 //export GodbcScan
-func GodbcScan(h C.godbc_handle_t, values ***C.char, count C.int, error **C.char) *C.char {
+func GodbcScan(h C.godbc_handle_t, values ***C.char, count C.int, errPtr **C.char) *C.char {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
 	rows, ok := obj.(*sql.Rows)
 	if !ok {
-		*error = C.CString("Invalid result set handle")
+		*errPtr = C.CString("Invalid result set handle")
 		return nil
 	}
 
@@ -269,7 +357,7 @@ func GodbcScan(h C.godbc_handle_t, values ***C.char, count C.int, error **C.char
 	}
 
 	if err := rows.Scan(scanValues...); err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
@@ -294,22 +382,24 @@ func GodbcScan(h C.godbc_handle_t, values ***C.char, count C.int, error **C.char
 }
 
 //export GodbcCloseRows
-func GodbcCloseRows(h C.godbc_handle_t, error **C.char) *C.char {
+func GodbcCloseRows(h C.godbc_handle_t, errPtr **C.char) *C.char {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
 	rows, ok := obj.(*sql.Rows)
 	if !ok {
-		*error = C.CString("Invalid result set handle")
+		*errPtr = C.CString("Invalid result set handle")
 		return nil
 	}
 
+	// Remove the handle before closing to prevent race conditions
 	removeHandle(Handle(h))
+
 	if err := rows.Close(); err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
@@ -317,29 +407,29 @@ func GodbcCloseRows(h C.godbc_handle_t, error **C.char) *C.char {
 }
 
 //export GodbcBeginTransaction
-func GodbcBeginTransaction(h C.godbc_handle_t, error **C.char) C.godbc_handle_t {
+func GodbcBeginTransaction(h C.godbc_handle_t, errPtr **C.char) C.godbc_handle_t {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return 0
 	}
 
 	pool, ok := obj.(*Pool)
 	if !ok {
-		*error = C.CString("Invalid connection handle")
+		*errPtr = C.CString("Invalid connection handle")
 		return 0
 	}
 
 	conn, err := pool.getConnectionWithRetry()
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return 0
 	}
 
 	tx, err := conn.BeginTx(context.Background(), nil)
 	if err != nil {
 		conn.Close()
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return 0
 	}
 
@@ -347,22 +437,22 @@ func GodbcBeginTransaction(h C.godbc_handle_t, error **C.char) C.godbc_handle_t 
 }
 
 //export GodbcExecuteInTransaction
-func GodbcExecuteInTransaction(h C.godbc_handle_t, query *C.char, error **C.char) *C.char {
+func GodbcExecuteInTransaction(h C.godbc_handle_t, query *C.char, errPtr **C.char) *C.char {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
 	tx, ok := obj.(*sql.Tx)
 	if !ok {
-		*error = C.CString("Invalid transaction handle")
+		*errPtr = C.CString("Invalid transaction handle")
 		return nil
 	}
 
 	_, err = tx.ExecContext(context.Background(), C.GoString(query))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
@@ -370,21 +460,21 @@ func GodbcExecuteInTransaction(h C.godbc_handle_t, query *C.char, error **C.char
 }
 
 //export GodbcCommit
-func GodbcCommit(h C.godbc_handle_t, error **C.char) *C.char {
+func GodbcCommit(h C.godbc_handle_t, errPtr **C.char) *C.char {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
 	tx, ok := obj.(*sql.Tx)
 	if !ok {
-		*error = C.CString("Invalid transaction handle")
+		*errPtr = C.CString("Invalid transaction handle")
 		return nil
 	}
 
 	if err := tx.Commit(); err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
@@ -392,21 +482,21 @@ func GodbcCommit(h C.godbc_handle_t, error **C.char) *C.char {
 }
 
 //export GodbcRollback
-func GodbcRollback(h C.godbc_handle_t, error **C.char) *C.char {
+func GodbcRollback(h C.godbc_handle_t, errPtr **C.char) *C.char {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
 	tx, ok := obj.(*sql.Tx)
 	if !ok {
-		*error = C.CString("Invalid transaction handle")
+		*errPtr = C.CString("Invalid transaction handle")
 		return nil
 	}
 
 	if err := tx.Rollback(); err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
@@ -414,29 +504,29 @@ func GodbcRollback(h C.godbc_handle_t, error **C.char) *C.char {
 }
 
 //export GodbcPrepare
-func GodbcPrepare(h C.godbc_handle_t, query *C.char, error **C.char) C.godbc_handle_t {
+func GodbcPrepare(h C.godbc_handle_t, query *C.char, errPtr **C.char) C.godbc_handle_t {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return 0
 	}
 
 	pool, ok := obj.(*Pool)
 	if !ok {
-		*error = C.CString("Invalid connection handle")
+		*errPtr = C.CString("Invalid connection handle")
 		return 0
 	}
 
 	conn, err := pool.getConnectionWithRetry()
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return 0
 	}
 
 	stmt, err := conn.PrepareContext(context.Background(), C.GoString(query))
 	if err != nil {
 		conn.Close()
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return 0
 	}
 
@@ -444,27 +534,28 @@ func GodbcPrepare(h C.godbc_handle_t, query *C.char, error **C.char) C.godbc_han
 }
 
 //export GodbcExecutePrepared
-func GodbcExecutePrepared(h C.godbc_handle_t, params **C.char, paramCount C.int, error **C.char) *C.char {
+func GodbcExecutePrepared(h C.godbc_handle_t, params **C.char, paramCount C.int, errPtr **C.char) *C.char {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
 	stmt, ok := obj.(*sql.Stmt)
 	if !ok {
-		*error = C.CString("Invalid prepared statement handle")
+		*errPtr = C.CString("Invalid prepared statement handle")
 		return nil
 	}
 
 	args := make([]interface{}, paramCount)
 	for i := 0; i < int(paramCount); i++ {
-		args[i] = C.GoString((*[1 << 30]*C.char)(unsafe.Pointer(params))[i])
+		paramPtr := (**C.char)(unsafe.Pointer(uintptr(unsafe.Pointer(params)) + uintptr(i)*unsafe.Sizeof(*params)))
+		args[i] = C.GoString(*paramPtr)
 	}
 
 	_, err = stmt.ExecContext(context.Background(), args...)
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
@@ -472,22 +563,22 @@ func GodbcExecutePrepared(h C.godbc_handle_t, params **C.char, paramCount C.int,
 }
 
 //export GodbcClosePrepared
-func GodbcClosePrepared(h C.godbc_handle_t, error **C.char) *C.char {
+func GodbcClosePrepared(h C.godbc_handle_t, errPtr **C.char) *C.char {
 	obj, err := getHandle(Handle(h))
 	if err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
 	stmt, ok := obj.(*sql.Stmt)
 	if !ok {
-		*error = C.CString("Invalid prepared statement handle")
+		*errPtr = C.CString("Invalid prepared statement handle")
 		return nil
 	}
 
 	removeHandle(Handle(h))
 	if err := stmt.Close(); err != nil {
-		*error = C.CString(err.Error())
+		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
@@ -497,6 +588,14 @@ func GodbcClosePrepared(h C.godbc_handle_t, error **C.char) *C.char {
 func storeHandle(obj interface{}) C.godbc_handle_t {
 	mu.Lock()
 	defer mu.Unlock()
+
+	// Check if the object is already stored
+	for h, existing := range handles {
+		if existing == obj {
+			return C.godbc_handle_t(h)
+		}
+	}
+
 	h := nextID
 	nextID++
 	handles[h] = obj
@@ -506,6 +605,7 @@ func storeHandle(obj interface{}) C.godbc_handle_t {
 func getHandle(h Handle) (interface{}, error) {
 	mu.RLock()
 	defer mu.RUnlock()
+
 	if obj, ok := handles[h]; ok {
 		return obj, nil
 	}
