@@ -34,6 +34,7 @@ char* GodbcCloseRows(godbc_handle handle, char** errPtr);
 // Transaction management
 godbc_handle GodbcBeginTransaction(godbc_handle handle, char** errPtr);
 char* GodbcExecuteInTransaction(godbc_handle handle, const char* query, char** errPtr);
+char* GodbcExecuteInTransactionWithParams(godbc_handle handle, const char* query, char** params, int paramCount, char** errPtr);
 char* GodbcCommit(godbc_handle handle, char** errPtr);
 char* GodbcRollback(godbc_handle handle, char** errPtr);
 

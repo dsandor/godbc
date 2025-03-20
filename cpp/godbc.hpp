@@ -52,7 +52,8 @@ public:
     void scan(std::vector<std::string>& values) {
         char** row = nullptr;
         char* errPtr = nullptr;
-        GodbcScan(handle_, &row, static_cast<int>(values.size()), &errPtr);
+        size_t numColumns = values.size();
+        GodbcScan(handle_, &row, static_cast<int>(numColumns), &errPtr);
         if (errPtr) {
             std::string err(errPtr);
             free(errPtr);
@@ -60,8 +61,8 @@ public:
         }
 
         values.clear();
-        values.reserve(static_cast<size_t>(values.size()));
-        for (int i = 0; i < static_cast<int>(values.size()); ++i) {
+        values.reserve(numColumns);
+        for (size_t i = 0; i < numColumns; ++i) {
             values.emplace_back(row[i]);
             free(row[i]);
         }
@@ -78,6 +79,23 @@ private:
         std::ostringstream ss;
         ss << value;
         return ss.str();
+    }
+
+    // Specialization for string types to add quotes and escape single quotes
+    template<>
+    std::string toString<std::string>(const std::string& value) {
+        std::string escaped = value;
+        size_t pos = 0;
+        while ((pos = escaped.find('\'', pos)) != std::string::npos) {
+            escaped.replace(pos, 1, "''");
+            pos += 2;
+        }
+        return "'" + escaped + "'";
+    }
+
+    template<>
+    std::string toString<const char*>(const char* const& value) {
+        return toString(std::string(value));
     }
 
 public:
@@ -122,6 +140,30 @@ private:
     bool committed_;
     bool rolledBack_;
 
+    template<typename T>
+    static std::string toString(const T& value) {
+        std::ostringstream ss;
+        ss << value;
+        return ss.str();
+    }
+
+    // Specialization for string types to add quotes and escape single quotes
+    template<>
+    std::string toString<std::string>(const std::string& value) {
+        std::string escaped = value;
+        size_t pos = 0;
+        while ((pos = escaped.find('\'', pos)) != std::string::npos) {
+            escaped.replace(pos, 1, "''");
+            pos += 2;
+        }
+        return "'" + escaped + "'";
+    }
+
+    template<>
+    std::string toString<const char*>(const char* const& value) {
+        return toString(std::string(value));
+    }
+
 public:
     explicit Transaction(godbc_handle handle) : handle_(handle), committed_(false), rolledBack_(false) {}
     ~Transaction() noexcept(false) {
@@ -133,6 +175,27 @@ public:
     void execute(const std::string& query) {
         char* errPtr = nullptr;
         GodbcExecuteInTransaction(handle_, query.c_str(), &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
+            throw Error(err);
+        }
+    }
+
+    template<typename... Args>
+    void execute(const std::string& query, const Args&... args) {
+        std::vector<std::string> params;
+        params.reserve(sizeof...(args));
+        (params.push_back(toString(args)), ...);
+
+        std::vector<char*> cParams;
+        cParams.reserve(params.size());
+        for (const auto& p : params) {
+            cParams.push_back(const_cast<char*>(p.c_str()));
+        }
+
+        char* errPtr = nullptr;
+        GodbcExecuteInTransactionWithParams(handle_, query.c_str(), cParams.data(), static_cast<int>(cParams.size()), &errPtr);
         if (errPtr) {
             std::string err(errPtr);
             free(errPtr);
@@ -169,6 +232,30 @@ class Connection {
 private:
     godbc_handle handle_;
 
+    template<typename T>
+    static std::string toString(const T& value) {
+        std::ostringstream ss;
+        ss << value;
+        return ss.str();
+    }
+
+    // Specialization for string types to add quotes and escape single quotes
+    template<>
+    std::string toString<std::string>(const std::string& value) {
+        std::string escaped = value;
+        size_t pos = 0;
+        while ((pos = escaped.find('\'', pos)) != std::string::npos) {
+            escaped.replace(pos, 1, "''");
+            pos += 2;
+        }
+        return "'" + escaped + "'";
+    }
+
+    template<>
+    std::string toString<const char*>(const char* const& value) {
+        return toString(std::string(value));
+    }
+
 public:
     explicit Connection(godbc_handle handle) : handle_(handle) {}
     ~Connection() noexcept(false) {
@@ -193,6 +280,23 @@ public:
         }
     }
 
+    template<typename... Args>
+    void execute(const std::string& query, const Args&... args) const {
+        std::vector<std::string> params;
+        params.reserve(sizeof...(args));
+        (params.push_back(toString(args)), ...);
+
+        std::string finalQuery = query;
+        for (const auto& param : params) {
+            size_t pos = finalQuery.find('?');
+            if (pos != std::string::npos) {
+                finalQuery.replace(pos, 1, param);
+            }
+        }
+
+        execute(finalQuery);
+    }
+
     ResultSet query(const std::string& query) const {
         char* errPtr = nullptr;
         godbc_handle handle = GodbcQuery(handle_, query.c_str(), &errPtr);
@@ -202,6 +306,23 @@ public:
             throw Error(err);
         }
         return ResultSet(handle);
+    }
+
+    template<typename... Args>
+    ResultSet query(const std::string& query, const Args&... args) const {
+        std::vector<std::string> params;
+        params.reserve(sizeof...(args));
+        (params.push_back(toString(args)), ...);
+
+        std::string finalQuery = query;
+        for (const auto& param : params) {
+            size_t pos = finalQuery.find('?');
+            if (pos != std::string::npos) {
+                finalQuery.replace(pos, 1, param);
+            }
+        }
+
+        return this->query(finalQuery);
     }
 
     Transaction beginTransaction() const {

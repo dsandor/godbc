@@ -438,19 +438,48 @@ func GodbcBeginTransaction(h C.godbc_handle_t, errPtr **C.char) C.godbc_handle_t
 
 //export GodbcExecuteInTransaction
 func GodbcExecuteInTransaction(h C.godbc_handle_t, query *C.char, errPtr **C.char) *C.char {
-	obj, err := getHandle(Handle(h))
-	if err != nil {
-		*errPtr = C.CString(err.Error())
+	obj, ok := handles[Handle(h)]
+	if !ok {
+		*errPtr = C.CString("invalid handle")
 		return nil
 	}
 
 	tx, ok := obj.(*sql.Tx)
 	if !ok {
-		*errPtr = C.CString("Invalid transaction handle")
+		*errPtr = C.CString("invalid transaction handle")
 		return nil
 	}
 
-	_, err = tx.ExecContext(context.Background(), C.GoString(query))
+	_, err := tx.ExecContext(context.Background(), C.GoString(query))
+	if err != nil {
+		*errPtr = C.CString(err.Error())
+		return nil
+	}
+
+	return nil
+}
+
+//export GodbcExecuteInTransactionWithParams
+func GodbcExecuteInTransactionWithParams(h C.godbc_handle_t, query *C.char, params **C.char, paramCount C.int, errPtr **C.char) *C.char {
+	obj, ok := handles[Handle(h)]
+	if !ok {
+		*errPtr = C.CString("invalid handle")
+		return nil
+	}
+
+	tx, ok := obj.(*sql.Tx)
+	if !ok {
+		*errPtr = C.CString("invalid transaction handle")
+		return nil
+	}
+
+	goParams := make([]interface{}, paramCount)
+	for i := 0; i < int(paramCount); i++ {
+		param := C.GoString(*(**C.char)(unsafe.Pointer(uintptr(unsafe.Pointer(params)) + uintptr(i)*unsafe.Sizeof(*params))))
+		goParams[i] = param
+	}
+
+	_, err := tx.ExecContext(context.Background(), C.GoString(query), goParams...)
 	if err != nil {
 		*errPtr = C.CString(err.Error())
 		return nil
