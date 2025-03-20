@@ -27,6 +27,7 @@ char* GodbcClose(godbc_handle handle, char** errPtr);
 // Query execution
 char* GodbcExecute(godbc_handle handle, const char* query, char** errPtr);
 godbc_handle GodbcQuery(godbc_handle handle, const char* query, char** errPtr);
+godbc_handle GodbcQueryWithParams(godbc_handle handle, const char* query, char** params, int paramCount, char** errPtr);
 int GodbcNext(godbc_handle handle, char** errPtr);
 char* GodbcScan(godbc_handle handle, char*** values, int count, char** errPtr);
 char* GodbcCloseRows(godbc_handle handle, char** errPtr);
@@ -34,6 +35,7 @@ char* GodbcCloseRows(godbc_handle handle, char** errPtr);
 // Transaction management
 godbc_handle GodbcBeginTransaction(godbc_handle handle, char** errPtr);
 char* GodbcExecuteInTransaction(godbc_handle handle, const char* query, char** errPtr);
+char* GodbcExecuteInTransactionWithParams(godbc_handle handle, const char* query, char** params, int paramCount, char** errPtr);
 char* GodbcCommit(godbc_handle handle, char** errPtr);
 char* GodbcRollback(godbc_handle handle, char** errPtr);
 
