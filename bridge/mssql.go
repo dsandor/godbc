@@ -62,12 +62,12 @@ func OpenMSSQL(connStr string, config *Config) (*sql.DB, error) {
 	return db, nil
 }
 
-func GetOrCreatePool(connStr string, config *Config) (*sql.DB, error) {
+func GetOrCreatePool(connStr string, config *Config) (*Pool, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if db, exists := connPool[connStr]; exists {
-		return db, nil
+	if pool, exists := connPool[connStr]; exists {
+		return pool, nil
 	}
 
 	db, err := OpenMSSQL(connStr, config)
@@ -75,6 +75,15 @@ func GetOrCreatePool(connStr string, config *Config) (*sql.DB, error) {
 		return nil, err
 	}
 
-	connPool[connStr] = db
-	return db, nil
+	pool := &Pool{
+		db:            db,
+		minConns:      config.MinConnections,
+		maxConns:      config.MaxConnections,
+		connTimeout:   config.ConnectTimeout,
+		retryDelay:    config.RetryDelay,
+		retryAttempts: config.RetryAttempts,
+	}
+
+	connPool[connStr] = pool
+	return pool, nil
 }
