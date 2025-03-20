@@ -23,22 +23,65 @@ public:
 class ResultSet {
 private:
     godbc_handle handle_;
+    bool closed_;
 
 public:
-    explicit ResultSet(godbc_handle handle) : handle_(handle) {}
-    ~ResultSet() noexcept(false) {
-        if (handle_) {
+    explicit ResultSet(godbc_handle handle) : handle_(handle), closed_(false) {}
+    ~ResultSet() noexcept {
+        if (!closed_) {
+            try {
+                close();
+            } catch (...) {
+                // Ignore errors in destructor
+            }
+        }
+    }
+
+    ResultSet(const ResultSet&) = delete;
+    ResultSet& operator=(const ResultSet&) = delete;
+    
+    ResultSet(ResultSet&& other) noexcept : handle_(other.handle_), closed_(other.closed_) {
+        other.handle_ = 0;
+        other.closed_ = true;
+    }
+    
+    ResultSet& operator=(ResultSet&& other) noexcept {
+        if (this != &other) {
+            if (!closed_) {
+                try {
+                    close();
+                } catch (...) {
+                    // Ignore errors in move assignment
+                }
+            }
+            handle_ = other.handle_;
+            closed_ = other.closed_;
+            other.handle_ = 0;
+            other.closed_ = true;
+        }
+        return *this;
+    }
+
+    void close() {
+        if (!closed_ && handle_) {
             char* errPtr = nullptr;
             GodbcCloseRows(handle_, &errPtr);
             if (errPtr) {
                 std::string err(errPtr);
                 free(errPtr);
+                closed_ = true;
+                handle_ = 0;
                 throw Error(err);
             }
+            closed_ = true;
+            handle_ = 0;
         }
     }
 
-    bool next() const {
+    bool next() {
+        if (closed_) {
+            throw Error("Result set is closed");
+        }
         char* errPtr = nullptr;
         int result = GodbcNext(handle_, &errPtr);
         if (errPtr) {
@@ -46,10 +89,16 @@ public:
             free(errPtr);
             throw Error(err);
         }
+        if (result == 0) {
+            close();
+        }
         return result == 1;
     }
 
     void scan(std::vector<std::string>& values) {
+        if (closed_) {
+            throw Error("Result set is closed");
+        }
         char** row = nullptr;
         char* errPtr = nullptr;
         size_t numColumns = values.size();
@@ -73,6 +122,7 @@ public:
 class PreparedStatement {
 private:
     godbc_handle handle_;
+    bool closed_;
 
     template<typename T>
     static std::string toString(const T& value) {
@@ -85,11 +135,30 @@ private:
     template<>
     std::string toString<std::string>(const std::string& value) {
         std::string escaped = value;
+        // Check if this is a LIKE pattern (contains % or _)
+        bool isLikePattern = (value.find('%') != std::string::npos || value.find('_') != std::string::npos);
+        
+        // Escape single quotes
         size_t pos = 0;
         while ((pos = escaped.find('\'', pos)) != std::string::npos) {
             escaped.replace(pos, 1, "''");
             pos += 2;
         }
+
+        // For LIKE patterns, we need to escape [ and ] characters
+        if (isLikePattern) {
+            pos = 0;
+            while ((pos = escaped.find('[', pos)) != std::string::npos) {
+                escaped.replace(pos, 1, "[[]");
+                pos += 3;
+            }
+            pos = 0;
+            while ((pos = escaped.find(']', pos)) != std::string::npos) {
+                escaped.replace(pos, 1, "[]]");
+                pos += 3;
+            }
+        }
+
         return "'" + escaped + "'";
     }
 
@@ -99,21 +168,63 @@ private:
     }
 
 public:
-    explicit PreparedStatement(godbc_handle handle) : handle_(handle) {}
-    ~PreparedStatement() noexcept(false) {
-        if (handle_) {
+    explicit PreparedStatement(godbc_handle handle) : handle_(handle), closed_(false) {}
+    ~PreparedStatement() noexcept {
+        if (!closed_) {
+            try {
+                close();
+            } catch (...) {
+                // Ignore errors in destructor
+            }
+        }
+    }
+
+    PreparedStatement(const PreparedStatement&) = delete;
+    PreparedStatement& operator=(const PreparedStatement&) = delete;
+    
+    PreparedStatement(PreparedStatement&& other) noexcept : handle_(other.handle_), closed_(other.closed_) {
+        other.handle_ = 0;
+        other.closed_ = true;
+    }
+    
+    PreparedStatement& operator=(PreparedStatement&& other) noexcept {
+        if (this != &other) {
+            if (!closed_) {
+                try {
+                    close();
+                } catch (...) {
+                    // Ignore errors in move assignment
+                }
+            }
+            handle_ = other.handle_;
+            closed_ = other.closed_;
+            other.handle_ = 0;
+            other.closed_ = true;
+        }
+        return *this;
+    }
+
+    void close() {
+        if (!closed_ && handle_) {
             char* errPtr = nullptr;
             GodbcClosePrepared(handle_, &errPtr);
             if (errPtr) {
                 std::string err(errPtr);
                 free(errPtr);
+                closed_ = true;
+                handle_ = 0;
                 throw Error(err);
             }
+            closed_ = true;
+            handle_ = 0;
         }
     }
 
     template<typename... Args>
     void execute(const Args&... args) {
+        if (closed_) {
+            throw Error("Prepared statement is closed");
+        }
         std::vector<std::string> params;
         params.reserve(sizeof...(args));
         (params.push_back(toString(args)), ...);
@@ -151,11 +262,30 @@ private:
     template<>
     std::string toString<std::string>(const std::string& value) {
         std::string escaped = value;
+        // Check if this is a LIKE pattern (contains % or _)
+        bool isLikePattern = (value.find('%') != std::string::npos || value.find('_') != std::string::npos);
+        
+        // Escape single quotes
         size_t pos = 0;
         while ((pos = escaped.find('\'', pos)) != std::string::npos) {
             escaped.replace(pos, 1, "''");
             pos += 2;
         }
+
+        // For LIKE patterns, we need to escape [ and ] characters
+        if (isLikePattern) {
+            pos = 0;
+            while ((pos = escaped.find('[', pos)) != std::string::npos) {
+                escaped.replace(pos, 1, "[[]");
+                pos += 3;
+            }
+            pos = 0;
+            while ((pos = escaped.find(']', pos)) != std::string::npos) {
+                escaped.replace(pos, 1, "[]]");
+                pos += 3;
+            }
+        }
+
         return "'" + escaped + "'";
     }
 
@@ -243,11 +373,30 @@ private:
     template<>
     std::string toString<std::string>(const std::string& value) {
         std::string escaped = value;
+        // Check if this is a LIKE pattern (contains % or _)
+        bool isLikePattern = (value.find('%') != std::string::npos || value.find('_') != std::string::npos);
+        
+        // Escape single quotes
         size_t pos = 0;
         while ((pos = escaped.find('\'', pos)) != std::string::npos) {
             escaped.replace(pos, 1, "''");
             pos += 2;
         }
+
+        // For LIKE patterns, we need to escape [ and ] characters
+        if (isLikePattern) {
+            pos = 0;
+            while ((pos = escaped.find('[', pos)) != std::string::npos) {
+                escaped.replace(pos, 1, "[[]");
+                pos += 3;
+            }
+            pos = 0;
+            while ((pos = escaped.find(']', pos)) != std::string::npos) {
+                escaped.replace(pos, 1, "[]]");
+                pos += 3;
+            }
+        }
+
         return "'" + escaped + "'";
     }
 
@@ -314,15 +463,20 @@ public:
         params.reserve(sizeof...(args));
         (params.push_back(toString(args)), ...);
 
-        std::string finalQuery = query;
-        for (const auto& param : params) {
-            size_t pos = finalQuery.find('?');
-            if (pos != std::string::npos) {
-                finalQuery.replace(pos, 1, param);
-            }
+        std::vector<char*> cParams;
+        cParams.reserve(params.size());
+        for (const auto& p : params) {
+            cParams.push_back(const_cast<char*>(p.c_str()));
         }
 
-        return this->query(finalQuery);
+        char* errPtr = nullptr;
+        godbc_handle handle = GodbcQueryWithParams(handle_, query.c_str(), cParams.data(), static_cast<int>(cParams.size()), &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
+            throw Error(err);
+        }
+        return ResultSet(handle);
     }
 
     Transaction beginTransaction() const {
