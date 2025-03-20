@@ -1,0 +1,14 @@
+write code in golang
+build a library that can be linked in to a C++ application
+this library should allow a C++ application to connect to a database
+create a database pool based on a mssql server connection string
+allow creating a pool and giving the pool a name and a connection string
+c++ application should be able to query the database using the pool name
+sql commands could be select or insert or update or delete and may take parameters
+the c++ application should be able to execute the sql command and return the results
+the c++ application should be able to close the connection to the database and tear down the pool
+the pool should keep a minimum number of connections open
+the pool should have a maximum number of connections
+the pool should be a mssql driver based pool
+the pool should be able to handle connection errors and retries
+the pool should be able to handle connection timeouts

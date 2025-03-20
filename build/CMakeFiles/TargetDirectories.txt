@@ -1,0 +1,5 @@
+/Users/dsandor/Projects/godbc/build/CMakeFiles/godbc_bridge.dir
+/Users/dsandor/Projects/godbc/build/CMakeFiles/example.dir
+/Users/dsandor/Projects/godbc/build/CMakeFiles/benchmark.dir
+/Users/dsandor/Projects/godbc/build/CMakeFiles/edit_cache.dir
+/Users/dsandor/Projects/godbc/build/CMakeFiles/rebuild_cache.dir
