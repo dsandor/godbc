@@ -107,20 +107,20 @@ struct GodbcConnect_return {
 	godbc_handle_t r0;
 	char* r1;
 };
-extern struct GodbcConnect_return GodbcConnect(char* connStr, int minConns, int maxConns, int connTimeoutMs, int retryDelayMs, int retryAttempts);
-extern void GodbcClose(godbc_handle_t h, char** error);
-extern char* GodbcExecute(godbc_handle_t h, char* query, char** error);
-extern godbc_handle_t GodbcQuery(godbc_handle_t h, char* query, char** error);
-extern int GodbcNext(godbc_handle_t h, char** error);
-extern char* GodbcScan(godbc_handle_t h, char*** values, int count, char** error);
-extern char* GodbcCloseRows(godbc_handle_t h, char** error);
-extern godbc_handle_t GodbcBeginTransaction(godbc_handle_t h, char** error);
-extern char* GodbcExecuteInTransaction(godbc_handle_t h, char* query, char** error);
-extern char* GodbcCommit(godbc_handle_t h, char** error);
-extern char* GodbcRollback(godbc_handle_t h, char** error);
-extern godbc_handle_t GodbcPrepare(godbc_handle_t h, char* query, char** error);
-extern char* GodbcExecutePrepared(godbc_handle_t h, char** params, int paramCount, char** error);
-extern char* GodbcClosePrepared(godbc_handle_t h, char** error);
+extern struct GodbcConnect_return GodbcConnect(char* connStr, int minConns, int maxConns, int connTimeoutMs, int retryDelayMs, int retryAttempts, int networkRetryDelaySecs, int verboseLogging, char** errPtr);
+extern void GodbcClose(godbc_handle_t h, char** errPtr);
+extern char* GodbcExecute(godbc_handle_t h, char* query, char** errPtr);
+extern godbc_handle_t GodbcQuery(godbc_handle_t h, char* query, char** errPtr);
+extern int GodbcNext(godbc_handle_t h, char** errPtr);
+extern char* GodbcScan(godbc_handle_t h, char*** values, int count, char** errPtr);
+extern char* GodbcCloseRows(godbc_handle_t h, char** errPtr);
+extern godbc_handle_t GodbcBeginTransaction(godbc_handle_t h, char** errPtr);
+extern char* GodbcExecuteInTransaction(godbc_handle_t h, char* query, char** errPtr);
+extern char* GodbcCommit(godbc_handle_t h, char** errPtr);
+extern char* GodbcRollback(godbc_handle_t h, char** errPtr);
+extern godbc_handle_t GodbcPrepare(godbc_handle_t h, char* query, char** errPtr);
+extern char* GodbcExecutePrepared(godbc_handle_t h, char** params, int paramCount, char** errPtr);
+extern char* GodbcClosePrepared(godbc_handle_t h, char** errPtr);
 
 #ifdef __cplusplus
 }

@@ -132,6 +132,57 @@ cmake ..
 make
 ```
 
+or
+
+```bash
+cd /Users/dsandor/Projects/godbc && rm -rf build && mkdir build && cd build && cmake .. && make
+```
+
+
 ## License
 
 MIT License
+
+### Benchmarking
+
+The project includes a benchmark application that can be used to test performance under various conditions. The benchmark app supports the following command line arguments:
+
+| Argument | Short | Description | Default |
+|----------|-------|-------------|---------|
+| `--connection` | `-c` | Connection string (required) | - |
+| `--num-queries` | `-n` | Number of queries to run | 1000 |
+| `--threads` | `-t` | Number of concurrent threads | 1 |
+| `--delay` | `-d` | Delay between queries in milliseconds | 0 |
+| `--transactions` | `-x` | Use transactions for queries | false |
+| `--write-queries` | `-w` | Use write queries that require transactions | false |
+| `--report` | `-r` | Report interval in milliseconds | 1000 |
+| `--verbose` | `-v` | Enable verbose logging | false |
+| `--retry-attempts` | `-a` | Number of network failure retries | 3 |
+| `--help` | `-h` | Show help message | - |
+
+Example usage:
+```bash
+./bin/benchmark -c "server=localhost;user id=sa;password=Password123;database=testdb" \
+                -n 10000 \
+                -t 4 \
+                -d 10 \
+                -a 5 \
+                -v
+```
+
+This will:
+- Connect to the specified database
+- Run 10,000 queries
+- Use 4 concurrent threads
+- Add a 10ms delay between queries
+- Attempt to retry network failures up to 5 times
+- Show verbose logging output
+
+The benchmark will report:
+- Progress percentage
+- Number of successful queries
+- Number of errors
+- Number of connection retries
+- Average query execution time
+- Average connection creation time
+- Queries per second (QPS)

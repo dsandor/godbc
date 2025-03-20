@@ -32,8 +32,9 @@ void runQueries(const godbc::Connection& conn) {
         // Simple query
         auto result = conn.query("SELECT * FROM users ORDER BY id;");
         std::cout << "\nAll users:\n";
-        while (result->next()) {
-            auto row = result->getRow(2);  // 2 columns: id and name
+        std::vector<std::string> row(2);  // 2 columns: id and name
+        while (result.next()) {
+            result.scan(row);
             std::cout << "ID: " << row[0] << ", Name: " << row[1] << std::endl;
         }
         
@@ -55,9 +56,10 @@ void runQueries(const godbc::Connection& conn) {
         
         std::cout << "\nUsers with ID > 1:\n";
         auto rows = conn.query("SELECT name FROM users WHERE id > 1 ORDER BY id;");
-        while (rows->next()) {
-            auto row = rows->getRow(1);  // 1 column: name
-            std::cout << "Name: " << row[0] << std::endl;
+        std::vector<std::string> nameRow(1);  // 1 column: name
+        while (rows.next()) {
+            rows.scan(nameRow);
+            std::cout << "Name: " << nameRow[0] << std::endl;
         }
     } catch (const godbc::Error& e) {
         std::cerr << "Database error: " << e.what() << std::endl;
@@ -83,7 +85,9 @@ int main() {
             20,            // Max connections
             30000,         // Connection timeout (ms)
             1000,          // Retry delay (ms)
-            3              // Retry attempts
+            3,             // Retry attempts
+            1,             // Network retry delay (seconds)
+            true          // Verbose logging
         );
 
         auto testConn = godbc::ConnectionPool::getConnection(testConnStr);

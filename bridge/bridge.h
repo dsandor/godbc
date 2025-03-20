@@ -21,27 +21,26 @@ typedef struct {
 
 // Connection functions
 godbc_handle GodbcConnect(const char* connStr, int minConns, int maxConns, 
-                         int connTimeoutMs, int retryDelayMs, int retryAttempts,
-                         char** error);
-char* GodbcClose(godbc_handle handle, char** error);
+                         int connTimeoutMs, int retryDelayMs, int retryAttempts, int networkRetryDelaySecs, int verboseLogging, char** errPtr);
+char* GodbcClose(godbc_handle handle, char** errPtr);
 
 // Query execution
-char* GodbcExecute(godbc_handle handle, const char* query, char** error);
-godbc_handle GodbcQuery(godbc_handle handle, const char* query, char** error);
-int GodbcNext(godbc_handle handle, char** error);
-char* GodbcScan(godbc_handle handle, char*** values, int count, char** error);
-char* GodbcCloseRows(godbc_handle handle, char** error);
+char* GodbcExecute(godbc_handle handle, const char* query, char** errPtr);
+godbc_handle GodbcQuery(godbc_handle handle, const char* query, char** errPtr);
+int GodbcNext(godbc_handle handle, char** errPtr);
+char* GodbcScan(godbc_handle handle, char*** values, int count, char** errPtr);
+char* GodbcCloseRows(godbc_handle handle, char** errPtr);
 
 // Transaction management
-godbc_handle GodbcBeginTransaction(godbc_handle handle, char** error);
-char* GodbcExecuteInTransaction(godbc_handle handle, const char* query, char** error);
-char* GodbcCommit(godbc_handle handle, char** error);
-char* GodbcRollback(godbc_handle handle, char** error);
+godbc_handle GodbcBeginTransaction(godbc_handle handle, char** errPtr);
+char* GodbcExecuteInTransaction(godbc_handle handle, const char* query, char** errPtr);
+char* GodbcCommit(godbc_handle handle, char** errPtr);
+char* GodbcRollback(godbc_handle handle, char** errPtr);
 
 // Prepared statements
-godbc_handle GodbcPrepare(godbc_handle handle, const char* query, char** error);
-char* GodbcExecutePrepared(godbc_handle handle, char** params, int paramCount, char** error);
-char* GodbcClosePrepared(godbc_handle handle, char** error);
+godbc_handle GodbcPrepare(godbc_handle handle, const char* query, char** errPtr);
+char* GodbcExecutePrepared(godbc_handle handle, char** params, int paramCount, char** errPtr);
+char* GodbcClosePrepared(godbc_handle handle, char** errPtr);
 
 #ifdef __cplusplus
 }

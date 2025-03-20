@@ -957,4 +957,5 @@ CMakeFiles/example.dir/examples/example.cpp.o: \
   /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.1.sdk/usr/include/c++/v1/print \
   /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.1.sdk/usr/include/unistd.h \
   /Users/dsandor/Projects/godbc/examples/../cpp/godbc.hpp \
-  /Users/dsandor/Projects/godbc/examples/../cpp/../bridge/bridge.h
+  /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.1.sdk/usr/include/c++/v1/sstream \
+  /Users/dsandor/Projects/godbc/bridge/bridge.h
