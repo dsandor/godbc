@@ -43,14 +43,14 @@ jobs:
             artifact_name: rhel7-gcc
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Install dependencies (RHEL 7)
         if: matrix.container == 'centos:7'
         run: |
           yum update -y
           yum groupinstall -y "Development Tools"
-          yum install -y cmake3
+          yum install -y cmake3 build-essential libfreetype6-dev libharfbuzz-dev
           yum install -y golang
           ln -s /usr/bin/cmake3 /usr/bin/cmake
 
@@ -97,9 +97,16 @@ jobs:
     if: github.event_name == 'release' && github.event.action == 'published'
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+    - name: Install Dependencies
+      env:
+        SCRIPT: |
+          apt-get update
+          apt-get install -y cmake build-essential libfreetype6-dev libharfbuzz-dev
+      run: docker exec build-container bash -c "$SCRIPT"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
