@@ -26,43 +26,30 @@ jobs:
       #
       # To add more build types (Release, Debug, RelWithDebInfo, etc.) customize the build_type list.
       matrix:
-        os: [ubuntu-latest, windows-latest, ubuntu-latest]
-        container: [null, null, centos:7]
-        build_type: [Release]
-        c_compiler: [gcc, clang, cl, gcc]
-        cpp_compiler: [g++, clang++, cl, g++]
-        artifact_name: [linux-gcc, linux-clang, windows-msvc, rhel7-gcc]
         include:
           - os: windows-latest
             container: null
             c_compiler: cl
             cpp_compiler: cl
+            build_type: Release
             artifact_name: windows-msvc
           - os: ubuntu-latest
             container: null
             c_compiler: gcc
             cpp_compiler: g++
+            build_type: Release
             artifact_name: linux-gcc
           - os: ubuntu-latest
             container: null
             c_compiler: clang
             cpp_compiler: clang++
+            build_type: Release
             artifact_name: linux-clang
           - os: ubuntu-latest
             container: centos:7
             c_compiler: gcc
             cpp_compiler: g++
-            artifact_name: rhel7-gcc
-        exclude:
-          - os: windows-latest
-            c_compiler: gcc
-          - os: windows-latest
-            c_compiler: clang
-          - os: ubuntu-latest
-            c_compiler: cl
-          - os: ubuntu-latest
-            container: null
-            c_compiler: gcc
+            build_type: Release
             artifact_name: rhel7-gcc
 
     steps:
