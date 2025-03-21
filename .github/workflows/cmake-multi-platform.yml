@@ -50,8 +50,9 @@ jobs:
         run: |
           yum update -y
           yum groupinstall -y "Development Tools"
-          yum install -y cmake3 build-essential libfreetype6-dev libharfbuzz-dev
+          yum install -y cmake3
           yum install -y golang
+          yum install -y nodejs
           ln -s /usr/bin/cmake3 /usr/bin/cmake
 
       - name: Set reusable strings
