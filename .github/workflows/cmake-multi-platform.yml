@@ -43,7 +43,7 @@ jobs:
             artifact_name: rhel7-gcc
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
       - name: Install dependencies (RHEL 7)
         if: matrix.container == 'centos:7'
@@ -97,7 +97,7 @@ jobs:
     if: github.event_name == 'release' && github.event.action == 'published'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
