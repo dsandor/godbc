@@ -1,0 +1,68 @@
+FROM --platform=linux/amd64 centos:7
+
+# Configure CentOS vault mirrors
+RUN sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-* && \
+    sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*
+
+# Install EPEL repository
+RUN yum install -y epel-release && \
+    sed -i 's/metalink/#metalink/g' /etc/yum.repos.d/epel* && \
+    sed -i 's|#baseurl=http://download.fedoraproject.org/pub|baseurl=https://archives.fedoraproject.org/pub/archive|g' /etc/yum.repos.d/epel*
+
+# Install development tools and dependencies
+RUN yum clean all && \
+    yum update -y && \
+    yum groupinstall -y "Development Tools" && \
+    yum install -y cmake3 wget && \
+    ln -s /usr/bin/cmake3 /usr/bin/cmake
+
+# Install Go 1.22.1
+RUN wget https://go.dev/dl/go1.22.1.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.22.1.linux-amd64.tar.gz && \
+    rm go1.22.1.linux-amd64.tar.gz && \
+    ln -s /usr/local/go/bin/go /usr/bin/go
+
+# Set working directory
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Build Go bridge first
+RUN cd bridge && \
+    go mod init godbc && \
+    go mod tidy && \
+    go build -buildmode=c-shared -o libgodbc.so .
+
+# Install devtoolset-7 from vault
+RUN yum install -y centos-release-scl && \
+    sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-SCLo-*.repo && \
+    sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-SCLo-*.repo && \
+    yum-config-manager --save --setopt=centos-sclo-rh.baseurl=http://vault.centos.org/centos/7/sclo/x86_64/rh/ && \
+    yum-config-manager --save --setopt=centos-sclo-sclo.baseurl=http://vault.centos.org/centos/7/sclo/x86_64/sclo/ && \
+    yum clean all && \
+    yum install -y devtoolset-7-gcc devtoolset-7-gcc-c++
+
+# Build the application
+RUN rm -rf build && \
+    mkdir build && \
+    cd build && \
+    source /opt/rh/devtoolset-7/enable && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=17 \
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+          -DCMAKE_CXX_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/g++ \
+          -DCMAKE_C_COMPILER=/opt/rh/devtoolset-7/root/usr/bin/gcc \
+          -DCMAKE_PREFIX_PATH=/build/bridge .. && \
+    make -j$(nproc)
+
+# Create output directory
+RUN mkdir -p /output/bin
+
+# Copy built binaries
+RUN cp build/bin/* /output/bin/ && \
+    cp bridge/libgodbc.so /output/bin/
+
+# Create a tar.gz archive
+RUN cd /output && \
+    tar -czf /build/rhel7-gcc-Release.tar.gz bin/ 

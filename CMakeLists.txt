@@ -21,13 +21,22 @@ set(CMAKE_INSTALL_RPATH "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 # Build Go bridge
-add_custom_target(godbc_bridge ALL
-    COMMAND ${GO_EXECUTABLE} build -buildmode=c-shared -o ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.dylib ${CMAKE_SOURCE_DIR}/bridge/bridge.go
-    COMMAND install_name_tool -id "@executable_path/libgodbc_bridge.dylib" ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.dylib
-    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/bridge/bridge.h ${CMAKE_BINARY_DIR}/include/bridge/bridge.h
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Building Go bridge"
-)
+if(APPLE)
+    add_custom_target(godbc_bridge ALL
+        COMMAND ${GO_EXECUTABLE} build -buildmode=c-shared -o ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.dylib ${CMAKE_SOURCE_DIR}/bridge/bridge.go
+        COMMAND install_name_tool -id "@executable_path/libgodbc_bridge.dylib" ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.dylib
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/bridge/bridge.h ${CMAKE_BINARY_DIR}/include/bridge/bridge.h
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Building Go bridge"
+    )
+else()
+    add_custom_target(godbc_bridge ALL
+        COMMAND ${GO_EXECUTABLE} build -buildmode=c-shared -o ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.so ${CMAKE_SOURCE_DIR}/bridge/bridge.go
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/bridge/bridge.h ${CMAKE_BINARY_DIR}/include/bridge/bridge.h
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Building Go bridge"
+    )
+endif()
 
 # Create directories
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/include/bridge)
@@ -43,7 +52,11 @@ target_include_directories(godbc INTERFACE
 
 # Link with Go bridge
 add_dependencies(godbc godbc_bridge)
-target_link_libraries(godbc INTERFACE ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.dylib)
+if(APPLE)
+    target_link_libraries(godbc INTERFACE ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.dylib)
+else()
+    target_link_libraries(godbc INTERFACE ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.so)
+endif()
 
 # Add macOS framework dependencies
 if(APPLE)
@@ -62,9 +75,17 @@ target_link_libraries(example PRIVATE godbc)
 target_link_libraries(benchmark PRIVATE godbc pthread)
 target_link_libraries(query_examples PRIVATE godbc)
 
-# Add custom command to copy dylib to bin directory
-add_custom_command(TARGET query_examples POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy
-    ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.dylib
-    ${CMAKE_BINARY_DIR}/bin/libgodbc_bridge.dylib
-)
+# Add custom command to copy shared library to bin directory
+if(APPLE)
+    add_custom_command(TARGET query_examples POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.dylib
+        ${CMAKE_BINARY_DIR}/bin/libgodbc_bridge.dylib
+    )
+else()
+    add_custom_command(TARGET query_examples POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_BINARY_DIR}/lib/libgodbc_bridge.so
+        ${CMAKE_BINARY_DIR}/bin/libgodbc_bridge.so
+    )
+endif()

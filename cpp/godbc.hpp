@@ -119,53 +119,55 @@ public:
     }
 };
 
+// Helper function for string conversion
+template<typename T>
+std::string toString(const T& value) {
+    std::ostringstream ss;
+    ss << value;
+    return ss.str();
+}
+
+// Specialization for string types
+template<>
+std::string toString<std::string>(const std::string& value) {
+    std::string escaped = value;
+    // Check if this is a LIKE pattern (contains % or _)
+    bool isLikePattern = (value.find('%') != std::string::npos || value.find('_') != std::string::npos);
+    
+    // Escape single quotes
+    size_t pos = 0;
+    while ((pos = escaped.find('\'', pos)) != std::string::npos) {
+        escaped.replace(pos, 1, "''");
+        pos += 2;
+    }
+
+    // For LIKE patterns, we need to escape [ and ] characters
+    if (isLikePattern) {
+        pos = 0;
+        while ((pos = escaped.find('[', pos)) != std::string::npos) {
+            escaped.replace(pos, 1, "[[]");
+            pos += 3;
+        }
+        pos = 0;
+        while ((pos = escaped.find(']', pos)) != std::string::npos) {
+            escaped.replace(pos, 1, "[]]");
+            pos += 3;
+        }
+    }
+
+    return "'" + escaped + "'";
+}
+
+// Specialization for const char*
+template<>
+std::string toString<const char*>(const char* const& value) {
+    return toString(std::string(value));
+}
+
 class PreparedStatement {
 private:
     godbc_handle handle_;
     bool closed_;
-
-    template<typename T>
-    static std::string toString(const T& value) {
-        std::ostringstream ss;
-        ss << value;
-        return ss.str();
-    }
-
-    // Specialization for string types to add quotes and escape single quotes
-    template<>
-    std::string toString<std::string>(const std::string& value) {
-        std::string escaped = value;
-        // Check if this is a LIKE pattern (contains % or _)
-        bool isLikePattern = (value.find('%') != std::string::npos || value.find('_') != std::string::npos);
-        
-        // Escape single quotes
-        size_t pos = 0;
-        while ((pos = escaped.find('\'', pos)) != std::string::npos) {
-            escaped.replace(pos, 1, "''");
-            pos += 2;
-        }
-
-        // For LIKE patterns, we need to escape [ and ] characters
-        if (isLikePattern) {
-            pos = 0;
-            while ((pos = escaped.find('[', pos)) != std::string::npos) {
-                escaped.replace(pos, 1, "[[]");
-                pos += 3;
-            }
-            pos = 0;
-            while ((pos = escaped.find(']', pos)) != std::string::npos) {
-                escaped.replace(pos, 1, "[]]");
-                pos += 3;
-            }
-        }
-
-        return "'" + escaped + "'";
-    }
-
-    template<>
-    std::string toString<const char*>(const char* const& value) {
-        return toString(std::string(value));
-    }
 
 public:
     explicit PreparedStatement(godbc_handle handle) : handle_(handle), closed_(false) {}
@@ -248,72 +250,66 @@ public:
 class Transaction {
 private:
     godbc_handle handle_;
-    bool committed_;
-    bool rolledBack_;
-
-    template<typename T>
-    static std::string toString(const T& value) {
-        std::ostringstream ss;
-        ss << value;
-        return ss.str();
-    }
-
-    // Specialization for string types to add quotes and escape single quotes
-    template<>
-    std::string toString<std::string>(const std::string& value) {
-        std::string escaped = value;
-        // Check if this is a LIKE pattern (contains % or _)
-        bool isLikePattern = (value.find('%') != std::string::npos || value.find('_') != std::string::npos);
-        
-        // Escape single quotes
-        size_t pos = 0;
-        while ((pos = escaped.find('\'', pos)) != std::string::npos) {
-            escaped.replace(pos, 1, "''");
-            pos += 2;
-        }
-
-        // For LIKE patterns, we need to escape [ and ] characters
-        if (isLikePattern) {
-            pos = 0;
-            while ((pos = escaped.find('[', pos)) != std::string::npos) {
-                escaped.replace(pos, 1, "[[]");
-                pos += 3;
-            }
-            pos = 0;
-            while ((pos = escaped.find(']', pos)) != std::string::npos) {
-                escaped.replace(pos, 1, "[]]");
-                pos += 3;
-            }
-        }
-
-        return "'" + escaped + "'";
-    }
-
-    template<>
-    std::string toString<const char*>(const char* const& value) {
-        return toString(std::string(value));
-    }
+    bool closed_;
 
 public:
-    explicit Transaction(godbc_handle handle) : handle_(handle), committed_(false), rolledBack_(false) {}
-    ~Transaction() noexcept(false) {
-        if (!committed_ && !rolledBack_) {
-            rollback();
+    explicit Transaction(godbc_handle handle) : handle_(handle), closed_(false) {}
+    ~Transaction() noexcept {
+        if (!closed_) {
+            try {
+                close();
+            } catch (...) {
+                // Ignore errors in destructor
+            }
         }
     }
 
-    void execute(const std::string& query) {
-        char* errPtr = nullptr;
-        GodbcExecuteInTransaction(handle_, query.c_str(), &errPtr);
-        if (errPtr) {
-            std::string err(errPtr);
-            free(errPtr);
-            throw Error(err);
+    Transaction(const Transaction&) = delete;
+    Transaction& operator=(const Transaction&) = delete;
+    
+    Transaction(Transaction&& other) noexcept : handle_(other.handle_), closed_(other.closed_) {
+        other.handle_ = 0;
+        other.closed_ = true;
+    }
+    
+    Transaction& operator=(Transaction&& other) noexcept {
+        if (this != &other) {
+            if (!closed_) {
+                try {
+                    close();
+                } catch (...) {
+                    // Ignore errors in move assignment
+                }
+            }
+            handle_ = other.handle_;
+            closed_ = other.closed_;
+            other.handle_ = 0;
+            other.closed_ = true;
+        }
+        return *this;
+    }
+
+    void close() {
+        if (!closed_ && handle_) {
+            char* errPtr = nullptr;
+            GodbcRollback(handle_, &errPtr);
+            if (errPtr) {
+                std::string err(errPtr);
+                free(errPtr);
+                closed_ = true;
+                handle_ = 0;
+                throw Error(err);
+            }
+            closed_ = true;
+            handle_ = 0;
         }
     }
 
     template<typename... Args>
     void execute(const std::string& query, const Args&... args) {
+        if (closed_) {
+            throw Error("Transaction is closed");
+        }
         std::vector<std::string> params;
         params.reserve(sizeof...(args));
         (params.push_back(toString(args)), ...);
@@ -334,131 +330,119 @@ public:
     }
 
     void commit() {
+        if (closed_) {
+            throw Error("Transaction is closed");
+        }
         char* errPtr = nullptr;
         GodbcCommit(handle_, &errPtr);
         if (errPtr) {
             std::string err(errPtr);
             free(errPtr);
+            closed_ = true;
+            handle_ = 0;
             throw Error(err);
         }
-        committed_ = true;
+        closed_ = true;
+        handle_ = 0;
     }
 
     void rollback() {
-        if (!rolledBack_) {
-            char* errPtr = nullptr;
-            GodbcRollback(handle_, &errPtr);
-            if (errPtr) {
-                std::string err(errPtr);
-                free(errPtr);
-                throw Error(err);
-            }
-            rolledBack_ = true;
+        if (closed_) {
+            throw Error("Transaction is closed");
         }
+        char* errPtr = nullptr;
+        GodbcRollback(handle_, &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
+            closed_ = true;
+            handle_ = 0;
+            throw Error(err);
+        }
+        closed_ = true;
+        handle_ = 0;
     }
 };
 
 class Connection {
 private:
     godbc_handle handle_;
-
-    template<typename T>
-    static std::string toString(const T& value) {
-        std::ostringstream ss;
-        ss << value;
-        return ss.str();
-    }
-
-    // Specialization for string types to add quotes and escape single quotes
-    template<>
-    std::string toString<std::string>(const std::string& value) {
-        std::string escaped = value;
-        // Check if this is a LIKE pattern (contains % or _)
-        bool isLikePattern = (value.find('%') != std::string::npos || value.find('_') != std::string::npos);
-        
-        // Escape single quotes
-        size_t pos = 0;
-        while ((pos = escaped.find('\'', pos)) != std::string::npos) {
-            escaped.replace(pos, 1, "''");
-            pos += 2;
-        }
-
-        // For LIKE patterns, we need to escape [ and ] characters
-        if (isLikePattern) {
-            pos = 0;
-            while ((pos = escaped.find('[', pos)) != std::string::npos) {
-                escaped.replace(pos, 1, "[[]");
-                pos += 3;
-            }
-            pos = 0;
-            while ((pos = escaped.find(']', pos)) != std::string::npos) {
-                escaped.replace(pos, 1, "[]]");
-                pos += 3;
-            }
-        }
-
-        return "'" + escaped + "'";
-    }
-
-    template<>
-    std::string toString<const char*>(const char* const& value) {
-        return toString(std::string(value));
-    }
+    bool closed_;
 
 public:
-    explicit Connection(godbc_handle handle) : handle_(handle) {}
-    ~Connection() noexcept(false) {
-        if (handle_) {
+    explicit Connection(godbc_handle handle) : handle_(handle), closed_(false) {}
+    
+    Connection(const std::string& connStr, int minConns = 1, int maxConns = 10,
+               int connTimeoutMs = 30000, int retryDelayMs = 1000, int retryAttempts = 3,
+               int networkRetryDelaySecs = 5, bool verboseLogging = false)
+        : handle_(0), closed_(false) {
+        char* errPtr = nullptr;
+        handle_ = GodbcConnect(connStr.c_str(), minConns, maxConns, connTimeoutMs,
+                             retryDelayMs, retryAttempts, networkRetryDelaySecs,
+                             verboseLogging ? 1 : 0, &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
+            throw Error(err);
+        }
+    }
+
+    ~Connection() noexcept {
+        if (!closed_) {
+            try {
+                close();
+            } catch (...) {
+                // Ignore errors in destructor
+            }
+        }
+    }
+
+    Connection(const Connection&) = delete;
+    Connection& operator=(const Connection&) = delete;
+    
+    Connection(Connection&& other) noexcept : handle_(other.handle_), closed_(other.closed_) {
+        other.handle_ = 0;
+        other.closed_ = true;
+    }
+    
+    Connection& operator=(Connection&& other) noexcept {
+        if (this != &other) {
+            if (!closed_) {
+                try {
+                    close();
+                } catch (...) {
+                    // Ignore errors in move assignment
+                }
+            }
+            handle_ = other.handle_;
+            closed_ = other.closed_;
+            other.handle_ = 0;
+            other.closed_ = true;
+        }
+        return *this;
+    }
+
+    void close() {
+        if (!closed_ && handle_) {
             char* errPtr = nullptr;
             GodbcClose(handle_, &errPtr);
             if (errPtr) {
                 std::string err(errPtr);
                 free(errPtr);
+                closed_ = true;
+                handle_ = 0;
                 throw Error(err);
             }
-        }
-    }
-
-    void execute(const std::string& query) const {
-        char* errPtr = nullptr;
-        GodbcExecute(handle_, query.c_str(), &errPtr);
-        if (errPtr) {
-            std::string err(errPtr);
-            free(errPtr);
-            throw Error(err);
+            closed_ = true;
+            handle_ = 0;
         }
     }
 
     template<typename... Args>
     void execute(const std::string& query, const Args&... args) const {
-        std::vector<std::string> params;
-        params.reserve(sizeof...(args));
-        (params.push_back(toString(args)), ...);
-
-        std::string finalQuery = query;
-        for (const auto& param : params) {
-            size_t pos = finalQuery.find('?');
-            if (pos != std::string::npos) {
-                finalQuery.replace(pos, 1, param);
-            }
+        if (closed_) {
+            throw Error("Connection is closed");
         }
-
-        execute(finalQuery);
-    }
-
-    ResultSet query(const std::string& query) const {
-        char* errPtr = nullptr;
-        godbc_handle handle = GodbcQuery(handle_, query.c_str(), &errPtr);
-        if (errPtr) {
-            std::string err(errPtr);
-            free(errPtr);
-            throw Error(err);
-        }
-        return ResultSet(handle);
-    }
-
-    template<typename... Args>
-    ResultSet query(const std::string& query, const Args&... args) const {
         std::vector<std::string> params;
         params.reserve(sizeof...(args));
         (params.push_back(toString(args)), ...);
@@ -470,92 +454,81 @@ public:
         }
 
         char* errPtr = nullptr;
-        godbc_handle handle = GodbcQueryWithParams(handle_, query.c_str(), cParams.data(), static_cast<int>(cParams.size()), &errPtr);
+        GodbcExecuteInTransactionWithParams(handle_, query.c_str(), cParams.data(), static_cast<int>(cParams.size()), &errPtr);
         if (errPtr) {
             std::string err(errPtr);
             free(errPtr);
             throw Error(err);
         }
-        return ResultSet(handle);
     }
 
-    Transaction beginTransaction() const {
+    template<typename... Args>
+    ResultSet query(const std::string& query, const Args&... args) const {
+        if (closed_) {
+            throw Error("Connection is closed");
+        }
+        std::vector<std::string> params;
+        params.reserve(sizeof...(args));
+        (params.push_back(toString(args)), ...);
+
+        std::vector<char*> cParams;
+        cParams.reserve(params.size());
+        for (const auto& p : params) {
+            cParams.push_back(const_cast<char*>(p.c_str()));
+        }
+
         char* errPtr = nullptr;
-        godbc_handle txHandle = GodbcBeginTransaction(handle_, &errPtr);
+        godbc_handle result = GodbcQueryWithParams(handle_, query.c_str(), cParams.data(), static_cast<int>(cParams.size()), &errPtr);
         if (errPtr) {
             std::string err(errPtr);
             free(errPtr);
             throw Error(err);
         }
-        return Transaction(txHandle);
+        return ResultSet(result);
     }
 
     PreparedStatement prepare(const std::string& query) const {
+        if (closed_) {
+            throw Error("Connection is closed");
+        }
         char* errPtr = nullptr;
-        godbc_handle stmtHandle = GodbcPrepare(handle_, query.c_str(), &errPtr);
+        godbc_handle handle = GodbcPrepare(handle_, query.c_str(), &errPtr);
         if (errPtr) {
             std::string err(errPtr);
             free(errPtr);
             throw Error(err);
         }
-        return PreparedStatement(stmtHandle);
+        return PreparedStatement(handle);
+    }
+
+    Transaction beginTransaction() const {
+        if (closed_) {
+            throw Error("Connection is closed");
+        }
+        char* errPtr = nullptr;
+        godbc_handle handle = GodbcBeginTransaction(handle_, &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
+            throw Error(err);
+        }
+        return Transaction(handle);
     }
 };
 
 class ConnectionPool {
-private:
-    std::string connStr_;
-    int minConns_;
-    int maxConns_;
-    int connTimeoutMs_;
-    int retryDelayMs_;
-    int retryAttempts_;
-    int networkRetryDelaySecs_;
-    bool verboseLogging_;
-    godbc_handle handle_;
-
 public:
-    ConnectionPool(const std::string& connStr, int minConns = 1, int maxConns = 10,
-                  int connTimeoutMs = 30000, int retryDelayMs = 1000, int retryAttempts = 3,
-                  int networkRetryDelaySecs = 1, bool verboseLogging = false)
-        : connStr_(connStr), minConns_(minConns), maxConns_(maxConns),
-          connTimeoutMs_(connTimeoutMs), retryDelayMs_(retryDelayMs),
-          retryAttempts_(retryAttempts), networkRetryDelaySecs_(networkRetryDelaySecs),
-          verboseLogging_(verboseLogging), handle_(0) {
-        char* err = nullptr;
-        handle_ = GodbcConnect(connStr_.c_str(), minConns_, maxConns_,
-                             connTimeoutMs_, retryDelayMs_, retryAttempts_,
-                             networkRetryDelaySecs_, verboseLogging_ ? 1 : 0, &err);
-        if (err) {
-            std::string error(err);
-            free(err);
-            throw std::runtime_error("Failed to connect: " + error);
-        }
-    }
-
-    ~ConnectionPool() {
-        if (handle_) {
-            char* err = nullptr;
-            GodbcClose(handle_, &err);
-            if (err) {
-                free(err);
-            }
-        }
-    }
-
-    static Connection getConnection(const std::string& connStr, 
-                                    int minConns = 1, int maxConns = 10,
-                                    int connTimeoutMs = 30000, int retryDelayMs = 1000,
-                                    int retryAttempts = 3, int networkRetryDelaySecs = 1,
-                                    bool verboseLogging = false) {
-        char* err = nullptr;
-        godbc_handle handle = GodbcConnect(connStr.c_str(), minConns, maxConns,
-                                         connTimeoutMs, retryDelayMs, retryAttempts,
-                                         networkRetryDelaySecs, verboseLogging ? 1 : 0, &err);
-        if (err) {
-            std::string error(err);
-            free(err);
-            throw std::runtime_error("Failed to connect: " + error);
+    static Connection getConnection(const std::string& connStr, int minConns = 1, int maxConns = 10,
+                                  int connTimeoutMs = 30000, int retryDelayMs = 1000, int retryAttempts = 3,
+                                  int networkRetryDelaySecs = 5, bool verboseLogging = false) {
+        char* errPtr = nullptr;
+        godbc_handle handle = GodbcConnect(connStr.c_str(), minConns, maxConns, connTimeoutMs,
+                                         retryDelayMs, retryAttempts, networkRetryDelaySecs,
+                                         verboseLogging ? 1 : 0, &errPtr);
+        if (errPtr) {
+            std::string err(errPtr);
+            free(errPtr);
+            throw Error(err);
         }
         return Connection(handle);
     }
