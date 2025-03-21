@@ -101,13 +101,6 @@ jobs:
         with:
           fetch-depth: 0
 
-    - name: Install Dependencies
-      env:
-        SCRIPT: |
-          apt-get update
-          apt-get install -y cmake build-essential libfreetype6-dev libharfbuzz-dev
-      run: docker exec build-container bash -c "$SCRIPT"
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
