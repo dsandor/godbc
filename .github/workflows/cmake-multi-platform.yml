@@ -83,6 +83,14 @@ jobs:
           path: ${{ steps.strings.outputs.build-output-dir }}/bin/
           retention-days: 7
 
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf "${{ steps.strings.outputs.build-output-dir }}"
+          if [ "${{ matrix.container }}" == "centos:7" ]; then
+            yum clean all
+          fi
+
   create-release:
     needs: [build]
     runs-on: ubuntu-latest
@@ -116,3 +124,9 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf artifacts
+          rm -f *.tar.gz
