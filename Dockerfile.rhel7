@@ -30,7 +30,6 @@ COPY . .
 
 # Build Go bridge first
 RUN cd bridge && \
-    go mod init godbc && \
     go mod tidy && \
     go build -buildmode=c-shared -o libgodbc.so .
 

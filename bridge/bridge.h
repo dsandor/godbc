@@ -22,10 +22,12 @@ typedef struct {
 // Connection functions
 godbc_handle GodbcConnect(const char* connStr, int minConns, int maxConns, 
                          int connTimeoutMs, int retryDelayMs, int retryAttempts, int networkRetryDelaySecs, int verboseLogging, char** errPtr);
+char* GodbcReturnConnection(godbc_handle handle, char** errPtr);
 char* GodbcClose(godbc_handle handle, char** errPtr);
 
 // Query execution
 char* GodbcExecute(godbc_handle handle, const char* query, char** errPtr);
+char* GodbcExecuteWithParams(godbc_handle handle, const char* query, char** params, int paramCount, char** errPtr);
 godbc_handle GodbcQuery(godbc_handle handle, const char* query, char** errPtr);
 godbc_handle GodbcQueryWithParams(godbc_handle handle, const char* query, char** params, int paramCount, char** errPtr);
 int GodbcNext(godbc_handle handle, char** errPtr);

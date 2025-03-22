@@ -57,6 +57,7 @@ type Pool struct {
 	mu                sync.RWMutex
 	activeConns       int
 	verboseLogging    bool
+	connections       []*sql.Conn
 }
 
 var (
@@ -71,25 +72,55 @@ func (p *Pool) preallocateConnections() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.connections = make([]*sql.Conn, 0, p.minConns)
 	for i := 0; i < p.minConns; i++ {
 		conn, err := p.db.Conn(context.Background())
 		if err != nil {
+			// Close all connections we've created so far
+			for _, c := range p.connections {
+				c.Close()
+			}
 			return fmt.Errorf("failed to preallocate connection: %v", err)
 		}
-		if err := conn.Close(); err != nil {
-			return fmt.Errorf("failed to close preallocated connection: %v", err)
+		// Test the connection
+		err = conn.PingContext(context.Background())
+		if err != nil {
+			conn.Close()
+			// Close all connections we've created so far
+			for _, c := range p.connections {
+				c.Close()
+			}
+			return fmt.Errorf("failed to ping connection: %v", err)
 		}
-		p.activeConns++
+		p.connections = append(p.connections, conn)
 	}
 	return nil
 }
 
 // getConnectionWithRetry attempts to get a connection with retries
 func (p *Pool) getConnectionWithRetry() (*sql.Conn, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// First try to get an existing connection
+	if len(p.connections) > 0 {
+		conn := p.connections[len(p.connections)-1]
+		p.connections = p.connections[:len(p.connections)-1]
+
+		// Test the connection
+		err := conn.PingContext(context.Background())
+		if err == nil {
+			return conn, nil
+		}
+
+		// If connection is dead, close it and create a new one
+		conn.Close()
+	}
+
+	// Create a new connection
 	var lastErr error
 	for attempt := 0; attempt < p.retryAttempts; attempt++ {
 		if attempt > 0 {
-			// Check if the error is a network-related error
 			if isNetworkError(lastErr) {
 				if p.verboseLogging {
 					fmt.Printf("Network error detected, waiting %v before retry: %v\n", p.networkRetryDelay, lastErr)
@@ -105,7 +136,6 @@ func (p *Pool) getConnectionWithRetry() (*sql.Conn, error) {
 
 		conn, err := p.db.Conn(context.Background())
 		if err == nil {
-			// Test the connection with a simple query
 			err = conn.PingContext(context.Background())
 			if err == nil {
 				return conn, nil
@@ -117,6 +147,61 @@ func (p *Pool) getConnectionWithRetry() (*sql.Conn, error) {
 		lastErr = err
 	}
 	return nil, fmt.Errorf("failed to get connection after %d attempts: %v", p.retryAttempts, lastErr)
+}
+
+// returnConnection returns a connection to the pool
+func (p *Pool) returnConnection(conn *sql.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Test the connection before returning it to the pool
+	err := conn.PingContext(context.Background())
+	if err != nil {
+		conn.Close()
+		// If we're below minimum connections, create a new one
+		if len(p.connections) < p.minConns {
+			for i := 0; i < p.retryAttempts; i++ {
+				newConn, err := p.db.Conn(context.Background())
+				if err == nil {
+					err = newConn.PingContext(context.Background())
+					if err == nil {
+						p.connections = append(p.connections, newConn)
+						break
+					}
+					newConn.Close()
+				}
+				if i < p.retryAttempts-1 {
+					time.Sleep(p.retryDelay)
+				}
+			}
+		}
+		return
+	}
+
+	// Keep the connection if we're below maxConns
+	if len(p.connections) < p.maxConns {
+		p.connections = append(p.connections, conn)
+	} else {
+		conn.Close()
+	}
+
+	// If we're still below minConns, create new connections
+	for len(p.connections) < p.minConns {
+		for i := 0; i < p.retryAttempts; i++ {
+			newConn, err := p.db.Conn(context.Background())
+			if err == nil {
+				err = newConn.PingContext(context.Background())
+				if err == nil {
+					p.connections = append(p.connections, newConn)
+					break
+				}
+				newConn.Close()
+			}
+			if i < p.retryAttempts-1 {
+				time.Sleep(p.retryDelay)
+			}
+		}
+	}
 }
 
 // isNetworkError checks if the error is related to network connectivity
@@ -172,20 +257,77 @@ func isSQLError(err error) bool {
 }
 
 //export GodbcConnect
-func GodbcConnect(connStr *C.char, minConns, maxConns C.int, connTimeoutMs, retryDelayMs, retryAttempts C.int, networkRetryDelaySecs C.int, verboseLogging C.int, errPtr **C.char) (C.godbc_handle_t, *C.char) {
+func GodbcConnect(connStr *C.char, minConns, maxConns C.int, connTimeoutMs, retryDelayMs, retryAttempts C.int, networkRetryDelaySecs C.int, verboseLogging C.int, errPtr **C.char) C.godbc_handle_t {
 	goConnStr := C.GoString(connStr)
 
 	mu.Lock()
+	defer mu.Unlock()
+
 	if pool, exists := connPool[goConnStr]; exists {
-		mu.Unlock()
-		return C.godbc_handle_t(pool.db.Stats().OpenConnections), nil
+		// Verify pool health and update settings
+		pool.mu.Lock()
+		pool.minConns = int(minConns)
+		pool.maxConns = int(maxConns)
+		pool.connTimeout = time.Duration(connTimeoutMs) * time.Millisecond
+		pool.retryDelay = time.Duration(retryDelayMs) * time.Millisecond
+		pool.retryAttempts = int(retryAttempts)
+		pool.networkRetryDelay = time.Duration(networkRetryDelaySecs) * time.Second
+		pool.verboseLogging = verboseLogging != 0
+
+		// Update database settings
+		pool.db.SetMaxOpenConns(pool.maxConns)
+		pool.db.SetMaxIdleConns(pool.minConns)
+		pool.db.SetConnMaxLifetime(pool.connTimeout)
+
+		// Verify and maintain minimum connections
+		for len(pool.connections) < pool.minConns {
+			conn, err := pool.db.Conn(context.Background())
+			if err != nil {
+				pool.mu.Unlock()
+				*errPtr = C.CString(fmt.Sprintf("failed to maintain minimum connections: %v", err))
+				return 0
+			}
+			if err := conn.PingContext(context.Background()); err != nil {
+				conn.Close()
+				pool.mu.Unlock()
+				*errPtr = C.CString(fmt.Sprintf("failed to ping connection: %v", err))
+				return 0
+			}
+			pool.connections = append(pool.connections, conn)
+		}
+
+		// Test existing connections and replace dead ones
+		for i := 0; i < len(pool.connections); i++ {
+			if err := pool.connections[i].PingContext(context.Background()); err != nil {
+				pool.connections[i].Close()
+				conn, err := pool.db.Conn(context.Background())
+				if err != nil {
+					pool.mu.Unlock()
+					*errPtr = C.CString(fmt.Sprintf("failed to replace dead connection: %v", err))
+					return 0
+				}
+				if err := conn.PingContext(context.Background()); err != nil {
+					conn.Close()
+					pool.mu.Unlock()
+					*errPtr = C.CString(fmt.Sprintf("failed to ping new connection: %v", err))
+					return 0
+				}
+				pool.connections[i] = conn
+			}
+		}
+		pool.mu.Unlock()
+
+		// Return a new handle for the existing pool
+		h := nextID
+		nextID++
+		handles[h] = pool
+		return C.godbc_handle_t(h)
 	}
-	mu.Unlock()
 
 	db, err := sql.Open("mssql", goConnStr)
 	if err != nil {
 		*errPtr = C.CString(err.Error())
-		return 0, nil
+		return 0
 	}
 
 	pool := &Pool{
@@ -204,24 +346,19 @@ func GodbcConnect(connStr *C.char, minConns, maxConns C.int, connTimeoutMs, retr
 	db.SetConnMaxLifetime(pool.connTimeout)
 
 	// Preallocate connections with retry
-	for i := 0; i < pool.minConns; i++ {
-		conn, err := pool.getConnectionWithRetry()
-		if err != nil {
-			db.Close()
-			*errPtr = C.CString(fmt.Sprintf("failed to preallocate connection %d: %v", i+1, err))
-			return 0, nil
-		}
-		conn.Close()
+	err = pool.preallocateConnections()
+	if err != nil {
+		db.Close()
+		*errPtr = C.CString(err.Error())
+		return 0
 	}
 
-	mu.Lock()
 	h := nextID
 	nextID++
 	handles[h] = pool
 	connPool[goConnStr] = pool
-	mu.Unlock()
 
-	return C.godbc_handle_t(h), nil
+	return C.godbc_handle_t(h)
 }
 
 //export GodbcClose
@@ -229,74 +366,119 @@ func GodbcClose(h C.godbc_handle_t, errPtr **C.char) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if pool, ok := handles[Handle(h)].(*Pool); ok {
-		if err := pool.db.Close(); err != nil {
-			*errPtr = C.CString(err.Error())
+	handle := Handle(h)
+	if obj, exists := handles[handle]; exists {
+		switch v := obj.(type) {
+		case *Pool:
+			// Close all connections in the pool
+			v.mu.Lock()
+			for _, conn := range v.connections {
+				conn.Close()
+			}
+			v.connections = nil
+			v.db.Close()
+			v.mu.Unlock()
+
+			// Remove from connPool if this is the last handle for this pool
+			var hasOtherHandles bool
+			for h2, obj2 := range handles {
+				if h2 != handle {
+					if pool2, ok := obj2.(*Pool); ok && pool2 == v {
+						hasOtherHandles = true
+						break
+					}
+				}
+			}
+			if !hasOtherHandles {
+				for connStr, pool := range connPool {
+					if pool == v {
+						delete(connPool, connStr)
+						break
+					}
+				}
+			}
+			delete(handles, handle)
+		case *sql.Conn:
+			// Find the pool this connection belongs to
+			var foundPool *Pool
+			for _, pool := range connPool {
+				pool.mu.Lock()
+				for _, conn := range pool.connections {
+					if conn == v {
+						foundPool = pool
+						break
+					}
+				}
+				pool.mu.Unlock()
+				if foundPool != nil {
+					break
+				}
+			}
+			if foundPool != nil {
+				foundPool.returnConnection(v)
+			} else {
+				v.Close()
+			}
+			delete(handles, handle)
+		case *sql.Tx:
+			v.Rollback()
+			delete(handles, handle)
+		case *sql.Stmt:
+			v.Close()
+			delete(handles, handle)
+		default:
+			*errPtr = C.CString("invalid handle type")
 			return
 		}
-		delete(handles, Handle(h))
-		*errPtr = nil
+	} else {
+		*errPtr = C.CString("invalid handle")
+		return
+	}
+}
+
+//export GodbcExecute
+func GodbcExecute(h C.godbc_handle_t, query *C.char, errPtr **C.char) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	handle := Handle(h)
+	if obj, exists := handles[handle]; exists {
+		switch v := obj.(type) {
+		case *Pool:
+			conn, err := v.getConnectionWithRetry()
+			if err != nil {
+				*errPtr = C.CString(err.Error())
+				return
+			}
+			defer v.returnConnection(conn)
+
+			_, err = conn.ExecContext(context.Background(), C.GoString(query))
+			if err != nil {
+				*errPtr = C.CString(err.Error())
+				return
+			}
+		case *sql.Conn:
+			_, err := v.ExecContext(context.Background(), C.GoString(query))
+			if err != nil {
+				*errPtr = C.CString(err.Error())
+			}
+		default:
+			*errPtr = C.CString("invalid handle type")
+		}
 	} else {
 		*errPtr = C.CString("invalid handle")
 	}
 }
 
-//export GodbcExecute
-func GodbcExecute(h C.godbc_handle_t, query *C.char, errPtr **C.char) *C.char {
-	obj, err := getHandle(Handle(h))
-	if err != nil {
-		*errPtr = C.CString(err.Error())
-		return nil
-	}
-
-	pool, ok := obj.(*Pool)
-	if !ok {
-		*errPtr = C.CString("Invalid connection handle")
-		return nil
-	}
-
-	var lastErr error
-	for attempt := 0; attempt < pool.retryAttempts; attempt++ {
-		conn, err := pool.getConnectionWithRetry()
-		if err != nil {
-			lastErr = err
-			if !isNetworkError(err) {
-				break
-			}
-			if attempt < pool.retryAttempts-1 {
-				time.Sleep(pool.retryDelay)
-			}
-			continue
-		}
-		defer conn.Close()
-
-		_, err = conn.ExecContext(context.Background(), C.GoString(query))
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		// Don't retry if it's a SQL error
-		if isSQLError(err) {
-			break
-		}
-		// Only retry network errors
-		if !isNetworkError(err) {
-			break
-		}
-		if attempt < pool.retryAttempts-1 {
-			time.Sleep(pool.retryDelay)
-		}
-	}
-
-	*errPtr = C.CString(lastErr.Error())
-	return nil
-}
-
 //export GodbcQuery
 func GodbcQuery(h C.godbc_handle_t, query *C.char, errPtr **C.char) C.godbc_handle_t {
-	obj, err := getHandle(Handle(h))
-	if err != nil {
-		*errPtr = C.CString(err.Error())
+	mu.Lock()
+	defer mu.Unlock()
+
+	handle := Handle(h)
+	obj, exists := handles[handle]
+	if !exists {
+		*errPtr = C.CString("invalid handle")
 		return 0
 	}
 
@@ -308,6 +490,7 @@ func GodbcQuery(h C.godbc_handle_t, query *C.char, errPtr **C.char) C.godbc_hand
 
 	var lastErr error
 	var rows *sql.Rows
+
 	for attempt := 0; attempt < pool.retryAttempts; attempt++ {
 		conn, err := pool.getConnectionWithRetry()
 		if err != nil {
@@ -329,10 +512,12 @@ func GodbcQuery(h C.godbc_handle_t, query *C.char, errPtr **C.char) C.godbc_hand
 			handles[h] = &queryResult{
 				rows: rows,
 				conn: conn,
+				pool: pool,
 			}
 			return C.godbc_handle_t(h)
 		}
-		conn.Close()
+
+		pool.returnConnection(conn)
 		lastErr = err
 		// Don't retry if it's a SQL error
 		if isSQLError(err) {
@@ -420,6 +605,7 @@ func GodbcQueryWithParams(h C.godbc_handle_t, query *C.char, params **C.char, pa
 type queryResult struct {
 	rows *sql.Rows
 	conn *sql.Conn
+	pool *Pool
 }
 
 //export GodbcNext
@@ -495,9 +681,13 @@ func GodbcScan(h C.godbc_handle_t, values ***C.char, count C.int, errPtr **C.cha
 
 //export GodbcCloseRows
 func GodbcCloseRows(h C.godbc_handle_t, errPtr **C.char) *C.char {
-	obj, err := getHandle(Handle(h))
-	if err != nil {
-		*errPtr = C.CString(err.Error())
+	mu.Lock()
+	defer mu.Unlock()
+
+	handle := Handle(h)
+	obj, exists := handles[handle]
+	if !exists {
+		*errPtr = C.CString("invalid handle")
 		return nil
 	}
 
@@ -508,22 +698,18 @@ func GodbcCloseRows(h C.godbc_handle_t, errPtr **C.char) *C.char {
 	}
 
 	// Remove the handle before closing to prevent race conditions
-	removeHandle(Handle(h))
+	delete(handles, handle)
 
 	// Close rows first
 	if err := qr.rows.Close(); err != nil {
-		// Even if rows.Close() fails, try to close the connection
-		qr.conn.Close()
+		// Even if rows.Close() fails, try to return the connection
+		qr.pool.returnConnection(qr.conn)
 		*errPtr = C.CString(err.Error())
 		return nil
 	}
 
-	// Then close the connection
-	if err := qr.conn.Close(); err != nil {
-		*errPtr = C.CString(err.Error())
-		return nil
-	}
-
+	// Then return the connection to the pool
+	qr.pool.returnConnection(qr.conn)
 	return nil
 }
 
@@ -554,7 +740,13 @@ func GodbcBeginTransaction(h C.godbc_handle_t, errPtr **C.char) C.godbc_handle_t
 		return 0
 	}
 
-	return storeHandle(tx)
+	mu.Lock()
+	handle := Handle(nextID)
+	nextID++
+	handles[handle] = tx
+	mu.Unlock()
+
+	return C.godbc_handle_t(handle)
 }
 
 //export GodbcExecuteInTransaction
@@ -628,6 +820,7 @@ func GodbcCommit(h C.godbc_handle_t, errPtr **C.char) *C.char {
 		return nil
 	}
 
+	removeHandle(Handle(h))
 	return nil
 }
 
@@ -650,6 +843,7 @@ func GodbcRollback(h C.godbc_handle_t, errPtr **C.char) *C.char {
 		return nil
 	}
 
+	removeHandle(Handle(h))
 	return nil
 }
 
@@ -733,6 +927,97 @@ func GodbcClosePrepared(h C.godbc_handle_t, errPtr **C.char) *C.char {
 	}
 
 	return nil
+}
+
+//export GodbcExecuteWithParams
+func GodbcExecuteWithParams(h C.godbc_handle_t, query *C.char, params **C.char, paramCount C.int, errPtr **C.char) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	handle := Handle(h)
+	if obj, exists := handles[handle]; exists {
+		goParams := make([]interface{}, paramCount)
+		for i := 0; i < int(paramCount); i++ {
+			param := C.GoString(*(**C.char)(unsafe.Pointer(uintptr(unsafe.Pointer(params)) + uintptr(i)*unsafe.Sizeof(*params))))
+			goParams[i] = param
+		}
+
+		switch v := obj.(type) {
+		case *Pool:
+			conn, err := v.getConnectionWithRetry()
+			if err != nil {
+				*errPtr = C.CString(err.Error())
+				return
+			}
+			defer v.returnConnection(conn)
+			_, err = conn.ExecContext(context.Background(), C.GoString(query), goParams...)
+			if err != nil {
+				*errPtr = C.CString(err.Error())
+			}
+		case *sql.Conn:
+			_, err := v.ExecContext(context.Background(), C.GoString(query), goParams...)
+			if err != nil {
+				*errPtr = C.CString(err.Error())
+			}
+		case *sql.Tx:
+			_, err := v.ExecContext(context.Background(), C.GoString(query), goParams...)
+			if err != nil {
+				*errPtr = C.CString(err.Error())
+			}
+		case *sql.Stmt:
+			_, err := v.ExecContext(context.Background(), goParams...)
+			if err != nil {
+				*errPtr = C.CString(err.Error())
+			}
+		default:
+			*errPtr = C.CString("invalid handle type")
+		}
+	} else {
+		*errPtr = C.CString("invalid handle")
+	}
+}
+
+//export GodbcReturnConnection
+func GodbcReturnConnection(h C.godbc_handle_t, errPtr **C.char) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	handle := Handle(h)
+	if obj, exists := handles[handle]; exists {
+		switch v := obj.(type) {
+		case *Pool:
+			// Don't actually close the pool, just remove the handle
+			delete(handles, handle)
+		case *sql.Conn:
+			// Find the pool this connection belongs to
+			var foundPool *Pool
+			for _, pool := range connPool {
+				pool.mu.Lock()
+				for _, conn := range pool.connections {
+					if conn == v {
+						foundPool = pool
+						break
+					}
+				}
+				pool.mu.Unlock()
+				if foundPool != nil {
+					break
+				}
+			}
+			if foundPool != nil {
+				foundPool.returnConnection(v)
+			} else {
+				v.Close()
+			}
+			delete(handles, handle)
+		default:
+			*errPtr = C.CString("invalid handle type")
+			return
+		}
+	} else {
+		*errPtr = C.CString("invalid handle")
+		return
+	}
 }
 
 func storeHandle(obj interface{}) C.godbc_handle_t {

@@ -1,0 +1,39 @@
+FROM --platform=linux/amd64 ubuntu:22.04
+
+RUN apt-get update && \
+    apt-get install -y \
+    build-essential \
+    cmake \
+    wget \
+    git \
+    zip
+
+RUN wget https://go.dev/dl/go1.22.1.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.22.1.linux-amd64.tar.gz && \
+    rm go1.22.1.linux-amd64.tar.gz
+
+ENV PATH=$PATH:/usr/local/go/bin
+
+WORKDIR /build
+COPY . .
+
+RUN cd bridge && \
+    go mod init godbc && \
+    go mod tidy && \
+    go build -buildmode=c-shared -o libgodbc.dylib
+
+RUN rm -rf build && \
+    mkdir build && \
+    cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=17 \
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+          -DCMAKE_PREFIX_PATH=/build/bridge .. && \
+    make -j$(nproc)
+
+RUN mkdir -p /output/bin
+RUN cp build/bin/* /output/bin/ && \
+    cp bridge/libgodbc.dylib /output/bin/
+
+RUN cd /output && \
+    zip -r /build/darwin-Release.zip bin/ 
