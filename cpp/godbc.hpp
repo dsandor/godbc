@@ -454,7 +454,11 @@ public:
         }
 
         char* errPtr = nullptr;
-        GodbcExecuteInTransactionWithParams(handle_, query.c_str(), cParams.data(), static_cast<int>(cParams.size()), &errPtr);
+        if (cParams.empty()) {
+            GodbcExecute(handle_, query.c_str(), &errPtr);
+        } else {
+            GodbcExecuteInTransactionWithParams(handle_, query.c_str(), cParams.data(), static_cast<int>(cParams.size()), &errPtr);
+        }
         if (errPtr) {
             std::string err(errPtr);
             free(errPtr);

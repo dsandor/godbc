@@ -1,0 +1,75 @@
+FROM --platform=linux/amd64 ubuntu:22.04
+
+# Install development tools and dependencies
+RUN apt-get update && \
+    apt-get install -y \
+    build-essential \
+    cmake \
+    wget \
+    git \
+    zip \
+    mingw-w64 \
+    gcc-mingw-w64 \
+    g++-mingw-w64 \
+    mingw-w64-tools \
+    binutils-mingw-w64 \
+    mingw-w64-x86-64-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Go 1.22.1
+RUN wget https://go.dev/dl/go1.22.1.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.22.1.linux-amd64.tar.gz && \
+    rm go1.22.1.linux-amd64.tar.gz && \
+    ln -s /usr/local/go/bin/go /usr/bin/go
+
+# Set CGO environment variables for Windows cross-compilation
+ENV CGO_ENABLED=1
+ENV CC=x86_64-w64-mingw32-gcc
+ENV CXX=x86_64-w64-mingw32-g++
+ENV GOOS=windows
+ENV GOARCH=amd64
+
+# Set working directory
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Build Go bridge for Windows
+RUN cd bridge && \
+    go mod init godbc && \
+    go mod tidy && \
+    go build -buildmode=c-shared -o libgodbc.dll .
+
+# Build the application
+RUN rm -rf build && \
+    mkdir build && \
+    cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=17 \
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+          -DCMAKE_PREFIX_PATH=/build/bridge \
+          -DCMAKE_SYSTEM_NAME=Windows \
+          -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+          -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+          -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
+          -DCMAKE_FIND_ROOT_PATH=/usr/x86_64-w64-mingw32 \
+          -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+          -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+          -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+          -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+          -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601 -D_MT -D_DLL -DWIN32_LEAN_AND_MEAN -I/usr/x86_64-w64-mingw32/include/c++/10-win32 -I/usr/x86_64-w64-mingw32/include/c++/10-win32/x86_64-w64-mingw32 -I/usr/x86_64-w64-mingw32/include/c++/10-win32/backward -I/usr/x86_64-w64-mingw32/include/x86_64-w64-mingw32 -I/usr/x86_64-w64-mingw32/include -D_GLIBCXX_USE_CXX11_ABI=1 -D_USE_MATH_DEFINES" \
+          -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0601 -D_MT -D_DLL -DWIN32_LEAN_AND_MEAN -I/usr/x86_64-w64-mingw32/include/c++/10-win32 -I/usr/x86_64-w64-mingw32/include/c++/10-win32/x86_64-w64-mingw32 -I/usr/x86_64-w64-mingw32/include/c++/10-win32/backward -I/usr/x86_64-w64-mingw32/include/x86_64-w64-mingw32 -I/usr/x86_64-w64-mingw32/include" \
+          -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++ -static" .. && \
+    make -j$(nproc)
+
+# Create output directory
+RUN mkdir -p /output/bin
+
+# Copy built binaries
+RUN cp build/bin/* /output/bin/ && \
+    cp bridge/libgodbc.dll /output/bin/
+
+# Create a zip archive
+RUN cd /output && \
+    zip -r /build/windows-msvc-Release.zip bin/ 

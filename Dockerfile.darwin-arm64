@@ -1,0 +1,47 @@
+FROM --platform=linux/arm64 ubuntu:22.04
+
+# Install development tools and dependencies
+RUN apt-get update && \
+    apt-get install -y \
+    build-essential \
+    cmake \
+    wget \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Go 1.22.1
+RUN wget https://go.dev/dl/go1.22.1.linux-arm64.tar.gz && \
+    tar -C /usr/local -xzf go1.22.1.linux-arm64.tar.gz && \
+    rm go1.22.1.linux-arm64.tar.gz && \
+    ln -s /usr/local/go/bin/go /usr/bin/go
+
+# Set working directory
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Build Go bridge
+RUN cd bridge && \
+    go mod tidy && \
+    go build -buildmode=c-shared -o libgodbc.dylib .
+
+# Build the application
+RUN mkdir -p build && \
+    cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=17 \
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+          -DCMAKE_PREFIX_PATH=/build/bridge .. && \
+    make -j$(nproc)
+
+# Create output directory
+RUN mkdir -p /output/bin
+
+# Copy built binaries
+RUN cp build/bin/* /output/bin/ && \
+    cp bridge/libgodbc.dylib /output/bin/
+
+# Create a tar.gz archive
+RUN cd /output && \
+    tar -czf /build/darwin-arm64-Release.tar.gz bin/ 

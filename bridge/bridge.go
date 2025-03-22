@@ -249,47 +249,43 @@ func GodbcExecute(h C.godbc_handle_t, query *C.char, errPtr **C.char) *C.char {
 		return nil
 	}
 
-	pool, ok := obj.(*Pool)
-	if !ok {
-		*errPtr = C.CString("Invalid connection handle")
-		return nil
-	}
-
-	var lastErr error
-	for attempt := 0; attempt < pool.retryAttempts; attempt++ {
-		conn, err := pool.getConnectionWithRetry()
+	switch v := obj.(type) {
+	case *Pool:
+		// Get a connection from the pool
+		conn, err := v.getConnectionWithRetry()
 		if err != nil {
-			lastErr = err
-			if !isNetworkError(err) {
-				break
-			}
-			if attempt < pool.retryAttempts-1 {
-				time.Sleep(pool.retryDelay)
-			}
-			continue
+			*errPtr = C.CString(err.Error())
+			return nil
 		}
 		defer conn.Close()
 
-		_, err = conn.ExecContext(context.Background(), C.GoString(query))
-		if err == nil {
+		// Execute the query directly without a transaction
+		if _, err := conn.ExecContext(context.Background(), C.GoString(query)); err != nil {
+			*errPtr = C.CString(err.Error())
 			return nil
 		}
-		lastErr = err
-		// Don't retry if it's a SQL error
-		if isSQLError(err) {
-			break
-		}
-		// Only retry network errors
-		if !isNetworkError(err) {
-			break
-		}
-		if attempt < pool.retryAttempts-1 {
-			time.Sleep(pool.retryDelay)
-		}
-	}
+		return nil
 
-	*errPtr = C.CString(lastErr.Error())
-	return nil
+	case *sql.Tx:
+		// Execute within an existing transaction
+		if _, err := v.ExecContext(context.Background(), C.GoString(query)); err != nil {
+			*errPtr = C.CString(err.Error())
+			return nil
+		}
+		return nil
+
+	case *sql.Conn:
+		// Execute directly on the connection
+		if _, err := v.ExecContext(context.Background(), C.GoString(query)); err != nil {
+			*errPtr = C.CString(err.Error())
+			return nil
+		}
+		return nil
+
+	default:
+		*errPtr = C.CString("invalid handle type")
+		return nil
+	}
 }
 
 //export GodbcQuery
@@ -554,7 +550,13 @@ func GodbcBeginTransaction(h C.godbc_handle_t, errPtr **C.char) C.godbc_handle_t
 		return 0
 	}
 
-	return storeHandle(tx)
+	mu.Lock()
+	handle := Handle(nextID)
+	nextID++
+	handles[handle] = tx
+	mu.Unlock()
+
+	return C.godbc_handle_t(handle)
 }
 
 //export GodbcExecuteInTransaction
@@ -628,6 +630,7 @@ func GodbcCommit(h C.godbc_handle_t, errPtr **C.char) *C.char {
 		return nil
 	}
 
+	removeHandle(Handle(h))
 	return nil
 }
 
@@ -650,6 +653,7 @@ func GodbcRollback(h C.godbc_handle_t, errPtr **C.char) *C.char {
 		return nil
 	}
 
+	removeHandle(Handle(h))
 	return nil
 }
 
