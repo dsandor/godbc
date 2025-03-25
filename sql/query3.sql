@@ -1,0 +1,1 @@
+SELECT @@SPID AS SessionID, @@TRANCOUNT AS TransactionCount; 

@@ -197,15 +197,77 @@ The `ResultSet` class represents the results of a query.
 
 All classes throw `godbc::Error` exceptions when errors occur. The error message contains details about what went wrong.
 
-```cpp
-try {
-    // Database operations
-} catch (const godbc::Error& e) {
-    std::cerr << "Database error: " << e.what() << std::endl;
-} catch (const std::exception& e) {
-    std::cerr << "Other error: " << e.what() << std::endl;
-}
+## Tools
+
+### SQL Runner
+
+The `sql_runner` is a command-line tool for benchmarking and testing SQL queries. It supports multi-threaded execution, connection pooling, and detailed performance metrics.
+
+#### Usage
+
+```bash
+sql_runner [options]
+
+Options:
+  -c <connection_string>  Connection string (required)
+  -d <directory>         SQL files directory (default: sql)
+  -t <threads>           Number of threads (default: 1)
+  -n <iterations>        Number of iterations (default: 1)
+  -i                     Run indefinitely
+  -s <ms>               Delay between queries in ms (default: 0)
+  -r <ms>               Report interval in ms (default: 1000)
+  -v                     Verbose output
+  -h                     Show this help message
 ```
+
+#### Example
+
+```bash
+# Run 3 iterations with 2 threads, 100ms delay between queries
+sql_runner -c "server=localhost;user id=sa;password=Password123;database=testdb" \
+          -t 2 -n 3 -s 100 -v
+```
+
+#### SQL Files
+
+The tool executes SQL files from the specified directory (default: `sql/`). Each file should contain a single SQL query. Files must have the `.sql` extension.
+
+Example SQL files:
+```sql
+-- query1.sql
+SELECT COUNT(*) FROM users;
+
+-- query2.sql
+SELECT TOP 10 * FROM orders ORDER BY order_date DESC;
+```
+
+#### Metrics
+
+The tool provides real-time and final metrics including:
+- Progress percentage
+- Successful and failed queries
+- Average query execution time
+- Average connection time
+- Queries per second (QPS)
+- Total execution time
+
+#### Features
+
+- **Multi-threaded Execution**: Run queries concurrently with configurable thread count
+- **Connection Pooling**: Efficiently manages database connections
+- **Iteration Control**: Run a fixed number of iterations or continuously
+- **Query Delay**: Add configurable delays between queries to control load
+- **Progress Reporting**: Real-time metrics with configurable reporting interval
+- **Verbose Logging**: Detailed execution information with `-v` flag
+- **Error Handling**: Robust error reporting and connection retry logic
+
+#### Use Cases
+
+1. **Performance Testing**: Measure query performance under different concurrency levels
+2. **Load Testing**: Generate sustained database load with multiple threads
+3. **Connection Pool Testing**: Verify connection pool behavior under load
+4. **Query Validation**: Test multiple SQL queries for correctness
+5. **Monitoring**: Track query performance metrics over time
 
 ## Best Practices
 

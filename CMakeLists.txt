@@ -70,10 +70,12 @@ endif()
 add_executable(example examples/example.cpp)
 add_executable(benchmark examples/benchmark.cpp)
 add_executable(query_examples examples/query_examples.cpp)
+add_executable(sql_runner examples/sql_runner.cpp)
 
 target_link_libraries(example PRIVATE godbc)
 target_link_libraries(benchmark PRIVATE godbc pthread)
 target_link_libraries(query_examples PRIVATE godbc)
+target_link_libraries(sql_runner PRIVATE godbc)
 
 # Add custom command to copy shared library to bin directory
 if(APPLE)
@@ -89,3 +91,8 @@ else()
         ${CMAKE_BINARY_DIR}/bin/libgodbc_bridge.so
     )
 endif()
+
+target_include_directories(example PRIVATE ${CMAKE_SOURCE_DIR}/cpp)
+target_include_directories(benchmark PRIVATE ${CMAKE_SOURCE_DIR}/cpp)
+target_include_directories(query_examples PRIVATE ${CMAKE_SOURCE_DIR}/cpp)
+target_include_directories(sql_runner PRIVATE ${CMAKE_SOURCE_DIR}/cpp)
