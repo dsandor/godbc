@@ -5,6 +5,16 @@ project(godbc LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Enable filesystem library
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-std=c++17" COMPILER_SUPPORTS_CXX17)
+if(COMPILER_SUPPORTS_CXX17)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+endif()
+
+# Add compile definitions for filesystem
+add_definitions(-D_GLIBCXX_USE_CXX11_ABI=0)
+
 # Find Go
 find_program(GO_EXECUTABLE go REQUIRED)
 message(STATUS "Found Go: ${GO_EXECUTABLE}")
@@ -75,7 +85,11 @@ add_executable(sql_runner examples/sql_runner.cpp)
 target_link_libraries(example PRIVATE godbc)
 target_link_libraries(benchmark PRIVATE godbc pthread)
 target_link_libraries(query_examples PRIVATE godbc)
-target_link_libraries(sql_runner PRIVATE godbc)
+if(APPLE)
+    target_link_libraries(sql_runner PRIVATE godbc pthread)
+else()
+    target_link_libraries(sql_runner PRIVATE godbc stdc++fs pthread)
+endif()
 
 # Add custom command to copy shared library to bin directory
 if(APPLE)

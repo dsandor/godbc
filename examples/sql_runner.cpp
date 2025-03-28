@@ -1,7 +1,13 @@
 #include <godbc.hpp>
 #include <iostream>
 #include <fstream>
+#ifdef __APPLE__
 #include <filesystem>
+namespace fs = std::filesystem;
+#else
+#include <experimental/filesystem>
+namespace fs = std::experimental::filesystem;
+#endif
 #include <vector>
 #include <thread>
 #include <mutex>
@@ -9,8 +15,6 @@
 #include <atomic>
 #include <iomanip>
 #include <sstream>
-
-namespace fs = std::filesystem;
 
 struct Metrics {
     std::atomic<uint64_t> totalQueries{0};
@@ -47,11 +51,15 @@ void printMetrics(const Metrics& metrics, const Config& config, const std::chron
 }
 
 void runQueries(const Config& config, int threadId, Metrics& metrics) {
-    std::cout << "[Thread " << threadId << "] Starting query execution..." << std::endl;
+    if (config.verbose) {
+        std::cout << "[Thread " << threadId << "] Starting query execution..." << std::endl;
+    }
     std::vector<std::string> sqlFiles;
     
     // Read SQL files from directory
-    std::cout << "[Thread " << threadId << "] Reading SQL files from " << config.sqlDir << std::endl;
+    if (config.verbose) {
+        std::cout << "[Thread " << threadId << "] Reading SQL files from " << config.sqlDir << std::endl;
+    }
     for (const auto& entry : fs::directory_iterator(config.sqlDir)) {
         if (entry.path().extension() == ".sql") {
             sqlFiles.push_back(entry.path().string());
@@ -62,16 +70,22 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
         std::cerr << "[Thread " << threadId << "] No SQL files found in directory: " << config.sqlDir << std::endl;
         return;
     }
-    std::cout << "[Thread " << threadId << "] Found " << sqlFiles.size() << " SQL files" << std::endl;
+    if (config.verbose) {
+        std::cout << "[Thread " << threadId << "] Found " << sqlFiles.size() << " SQL files" << std::endl;
+    }
 
     int iteration = 0;
     while (!metrics.shouldStop && (config.infinite || iteration < config.iterations)) {
-        std::cout << "[Thread " << threadId << "] Starting iteration " << (iteration + 1) << std::endl;
+        if (config.verbose) {
+            std::cout << "[Thread " << threadId << "] Starting iteration " << (iteration + 1) << std::endl;
+        }
         try {
             auto start = std::chrono::high_resolution_clock::now();
 
             // Get connection from pool
-            std::cout << "[Thread " << threadId << "] Getting connection from pool..." << std::endl;
+            if (config.verbose) {
+                std::cout << "[Thread " << threadId << "] Getting connection from pool..." << std::endl;
+            }
             auto conn = godbc::ConnectionPool::getConnection(config.connectionString);
             metrics.totalConnections++;
             
@@ -79,11 +93,15 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
             auto connTime = std::chrono::duration_cast<std::chrono::milliseconds>(connEnd - start);
             metrics.totalConnectionTime += connTime.count();
             
-            std::cout << "[Thread " << threadId << "] Connected successfully in " << connTime.count() << "ms" << std::endl;
+            if (config.verbose) {
+                std::cout << "[Thread " << threadId << "] Connected successfully in " << connTime.count() << "ms" << std::endl;
+            }
             
             // Execute each SQL file
             for (const auto& sqlFile : sqlFiles) {
-                std::cout << "[Thread " << threadId << "] Processing " << sqlFile << std::endl;
+                if (config.verbose) {
+                    std::cout << "[Thread " << threadId << "] Processing " << sqlFile << std::endl;
+                }
                 try {
                     std::ifstream file(sqlFile);
                     if (!file.is_open()) {
@@ -95,7 +113,9 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
                     buffer << file.rdbuf();
                     std::string sql = buffer.str();
                     
-                    std::cout << "[Thread " << threadId << "] Executing query (" << sql.length() << " bytes): " << sql.substr(0, 50) << "..." << std::endl;
+                    if (config.verbose) {
+                        std::cout << "[Thread " << threadId << "] Executing query (" << sql.length() << " bytes): " << sql.substr(0, 50) << "..." << std::endl;
+                    }
                     auto queryStart = std::chrono::high_resolution_clock::now();
                     conn.execute(sql);
                     auto queryEnd = std::chrono::high_resolution_clock::now();
@@ -104,10 +124,14 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
                     metrics.totalExecutionTime += queryTime.count();
                     metrics.successfulQueries++;
                     
-                    std::cout << "[Thread " << threadId << "] Query completed in " << queryTime.count() << "ms" << std::endl;
+                    if (config.verbose) {
+                        std::cout << "[Thread " << threadId << "] Query completed in " << queryTime.count() << "ms" << std::endl;
+                    }
                     
                     if (config.delayMs > 0) {
-                        std::cout << "[Thread " << threadId << "] Sleeping for " << config.delayMs << "ms" << std::endl;
+                        if (config.verbose) {
+                            std::cout << "[Thread " << threadId << "] Sleeping for " << config.delayMs << "ms" << std::endl;
+                        }
                         std::this_thread::sleep_for(std::chrono::milliseconds(config.delayMs));
                     }
                     
@@ -119,7 +143,9 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
                 metrics.totalQueries++;
             }
             
-            std::cout << "[Thread " << threadId << "] Closing connection" << std::endl;
+            if (config.verbose) {
+                std::cout << "[Thread " << threadId << "] Closing connection" << std::endl;
+            }
             conn.close();
             
         } catch (const std::exception& e) {
@@ -127,7 +153,9 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
         }
         
         iteration++;
-        std::cout << "[Thread " << threadId << "] Completed iteration " << iteration << std::endl;
+        if (config.verbose) {
+            std::cout << "[Thread " << threadId << "] Completed iteration " << iteration << std::endl;
+        }
     }
 }
 
