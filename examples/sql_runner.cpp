@@ -40,8 +40,12 @@ struct Config {
 
 void printMetrics(const Metrics& metrics, const Config& config, const std::chrono::milliseconds& elapsed) {
     std::lock_guard<std::mutex> lock(metrics.printMutex);
+    double expectedQueries = config.numThreads * config.iterations * 3.0; // 3 SQL files
+    double progress = (metrics.totalQueries * 100.0 / expectedQueries);
+    if (progress > 100.0) progress = 100.0;
+    
     std::cout << "\rProgress: " << std::fixed << std::setprecision(1)
-              << (metrics.totalQueries * 100.0 / (config.numThreads * config.iterations)) << "% | "
+              << progress << "% | "
               << "Success: " << metrics.successfulQueries << " | "
               << "Errors: " << metrics.failedQueries << " | "
               << "Avg Query Time: " << (metrics.totalExecutionTime / metrics.totalQueries) << "ms | "
