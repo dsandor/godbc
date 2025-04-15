@@ -58,6 +58,13 @@ type Pool struct {
 	activeConns       int
 	verboseLogging    bool
 	connections       []*sql.Conn
+	minExecTime       time.Duration
+	maxExecTime       time.Duration
+	minConnTime       time.Duration
+	maxConnTime       time.Duration
+	minCloseTime      time.Duration
+	maxCloseTime      time.Duration
+	metricsMu         sync.RWMutex
 }
 
 var (
@@ -101,6 +108,15 @@ func (p *Pool) preallocateConnections() error {
 func (p *Pool) getConnectionWithRetry() (*sql.Conn, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	startTime := time.Now()
+	defer func() {
+		connTime := time.Since(startTime)
+		p.updateConnectionTiming(connTime)
+		if p.verboseLogging {
+			fmt.Printf("Connection time: %v\n", connTime)
+		}
+	}()
 
 	// First try to get an existing connection
 	if len(p.connections) > 0 {
@@ -149,10 +165,58 @@ func (p *Pool) getConnectionWithRetry() (*sql.Conn, error) {
 	return nil, fmt.Errorf("failed to get connection after %d attempts: %v", p.retryAttempts, lastErr)
 }
 
+// updateConnectionTiming updates min and max connection times
+func (p *Pool) updateConnectionTiming(d time.Duration) {
+	p.metricsMu.Lock()
+	defer p.metricsMu.Unlock()
+
+	if p.minConnTime == 0 || d < p.minConnTime {
+		p.minConnTime = d
+	}
+	if d > p.maxConnTime {
+		p.maxConnTime = d
+	}
+}
+
+// updateExecutionTiming updates min and max execution times
+func (p *Pool) updateExecutionTiming(d time.Duration) {
+	p.metricsMu.Lock()
+	defer p.metricsMu.Unlock()
+
+	if p.minExecTime == 0 || d < p.minExecTime {
+		p.minExecTime = d
+	}
+	if d > p.maxExecTime {
+		p.maxExecTime = d
+	}
+}
+
+// updateCloseTiming updates min and max close times
+func (p *Pool) updateCloseTiming(d time.Duration) {
+	p.metricsMu.Lock()
+	defer p.metricsMu.Unlock()
+
+	if p.minCloseTime == 0 || d < p.minCloseTime {
+		p.minCloseTime = d
+	}
+	if d > p.maxCloseTime {
+		p.maxCloseTime = d
+	}
+}
+
 // returnConnection returns a connection to the pool
 func (p *Pool) returnConnection(conn *sql.Conn) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	startTime := time.Now()
+	defer func() {
+		closeTime := time.Since(startTime)
+		p.updateCloseTiming(closeTime)
+		if p.verboseLogging {
+			fmt.Printf("Connection close time: %v\n", closeTime)
+		}
+	}()
 
 	// Test the connection before returning it to the pool
 	err := conn.PingContext(context.Background())
@@ -258,107 +322,58 @@ func isSQLError(err error) bool {
 
 //export GodbcConnect
 func GodbcConnect(connStr *C.char, minConns, maxConns C.int, connTimeoutMs, retryDelayMs, retryAttempts C.int, networkRetryDelaySecs C.int, verboseLogging C.int, errPtr **C.char) C.godbc_handle_t {
-	goConnStr := C.GoString(connStr)
+	// Convert C string to Go string
+	connString := C.GoString(connStr)
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if pool, exists := connPool[goConnStr]; exists {
-		// Verify pool health and update settings
-		pool.mu.Lock()
-		pool.minConns = int(minConns)
-		pool.maxConns = int(maxConns)
-		pool.connTimeout = time.Duration(connTimeoutMs) * time.Millisecond
-		pool.retryDelay = time.Duration(retryDelayMs) * time.Millisecond
-		pool.retryAttempts = int(retryAttempts)
-		pool.networkRetryDelay = time.Duration(networkRetryDelaySecs) * time.Second
-		pool.verboseLogging = verboseLogging != 0
-
-		// Update database settings
-		pool.db.SetMaxOpenConns(pool.maxConns)
-		pool.db.SetMaxIdleConns(pool.minConns)
-		pool.db.SetConnMaxLifetime(pool.connTimeout)
-
-		// Verify and maintain minimum connections
-		for len(pool.connections) < pool.minConns {
-			conn, err := pool.db.Conn(context.Background())
-			if err != nil {
-				pool.mu.Unlock()
-				*errPtr = C.CString(fmt.Sprintf("failed to maintain minimum connections: %v", err))
-				return 0
-			}
-			if err := conn.PingContext(context.Background()); err != nil {
-				conn.Close()
-				pool.mu.Unlock()
-				*errPtr = C.CString(fmt.Sprintf("failed to ping connection: %v", err))
-				return 0
-			}
-			pool.connections = append(pool.connections, conn)
+	// Parse the connection string to get the key-value pairs
+	params := make(map[string]string)
+	for _, pair := range strings.Split(connString, ";") {
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
+			params[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 		}
-
-		// Test existing connections and replace dead ones
-		for i := 0; i < len(pool.connections); i++ {
-			if err := pool.connections[i].PingContext(context.Background()); err != nil {
-				pool.connections[i].Close()
-				conn, err := pool.db.Conn(context.Background())
-				if err != nil {
-					pool.mu.Unlock()
-					*errPtr = C.CString(fmt.Sprintf("failed to replace dead connection: %v", err))
-					return 0
-				}
-				if err := conn.PingContext(context.Background()); err != nil {
-					conn.Close()
-					pool.mu.Unlock()
-					*errPtr = C.CString(fmt.Sprintf("failed to ping new connection: %v", err))
-					return 0
-				}
-				pool.connections[i] = conn
-			}
-		}
-		pool.mu.Unlock()
-
-		// Return a new handle for the existing pool
-		h := nextID
-		nextID++
-		handles[h] = pool
-		return C.godbc_handle_t(h)
 	}
 
-	db, err := sql.Open("mssql", goConnStr)
+	// Convert connection timeout to time.Duration (now supporting larger values)
+	connTimeout := time.Duration(connTimeoutMs) * time.Millisecond
+
+	// Convert retry delay to time.Duration (now supporting larger values)
+	retryDelay := time.Duration(retryDelayMs) * time.Millisecond
+
+	// Convert network retry delay to time.Duration (now supporting larger values)
+	networkRetryDelay := time.Duration(networkRetryDelaySecs) * time.Second
+
+	db, err := sql.Open("sqlserver", connString)
 	if err != nil {
-		*errPtr = C.CString(err.Error())
+		setError(err, errPtr)
 		return 0
 	}
 
 	pool := &Pool{
 		db:                db,
-		minConns:          int(minConns),
-		maxConns:          int(maxConns),
-		connTimeout:       time.Duration(connTimeoutMs) * time.Millisecond,
-		retryDelay:        time.Duration(retryDelayMs) * time.Millisecond,
-		retryAttempts:     int(retryAttempts),
-		networkRetryDelay: time.Duration(networkRetryDelaySecs) * time.Second,
-		verboseLogging:    verboseLogging != 0,
+		minConns:         int(minConns),
+		maxConns:         int(maxConns),
+		connTimeout:      connTimeout,
+		retryDelay:       retryDelay,
+		retryAttempts:    int(retryAttempts),
+		networkRetryDelay: networkRetryDelay,
+		verboseLogging:   verboseLogging != 0,
 	}
 
-	db.SetMaxOpenConns(pool.maxConns)
-	db.SetMaxIdleConns(pool.minConns)
-	db.SetConnMaxLifetime(pool.connTimeout)
+	// Set connection pool settings
+	db.SetMaxOpenConns(int(maxConns))
+	db.SetMaxIdleConns(int(minConns))
+	db.SetConnMaxLifetime(connTimeout)
 
-	// Preallocate connections with retry
+	// Preallocate minimum connections
 	err = pool.preallocateConnections()
 	if err != nil {
 		db.Close()
-		*errPtr = C.CString(err.Error())
+		setError(err, errPtr)
 		return 0
 	}
 
-	h := nextID
-	nextID++
-	handles[h] = pool
-	connPool[goConnStr] = pool
-
-	return C.godbc_handle_t(h)
+	return C.godbc_handle_t(storeHandle(pool))
 }
 
 //export GodbcClose
@@ -438,36 +453,42 @@ func GodbcClose(h C.godbc_handle_t, errPtr **C.char) {
 
 //export GodbcExecute
 func GodbcExecute(h C.godbc_handle_t, query *C.char, errPtr **C.char) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	handle := Handle(h)
-	if obj, exists := handles[handle]; exists {
-		switch v := obj.(type) {
-		case *Pool:
-			conn, err := v.getConnectionWithRetry()
-			if err != nil {
-				*errPtr = C.CString(err.Error())
-				return
-			}
-			defer v.returnConnection(conn)
-
-			_, err = conn.ExecContext(context.Background(), C.GoString(query))
-			if err != nil {
-				*errPtr = C.CString(err.Error())
-				return
-			}
-		case *sql.Conn:
-			_, err := v.ExecContext(context.Background(), C.GoString(query))
-			if err != nil {
-				*errPtr = C.CString(err.Error())
-			}
-		default:
-			*errPtr = C.CString("invalid handle type")
-		}
-	} else {
-		*errPtr = C.CString("invalid handle")
+	obj, err := getHandle(Handle(h))
+	if err != nil {
+		setError(err, errPtr)
+		return
 	}
+
+	pool, ok := obj.(*Pool)
+	if !ok {
+		setError(fmt.Errorf("invalid handle type"), errPtr)
+		return
+	}
+
+	startTime := time.Now()
+	defer func() {
+		execTime := time.Since(startTime)
+		pool.updateExecutionTiming(execTime)
+		if pool.verboseLogging {
+			fmt.Printf("Query execution time: %v\n", execTime)
+		}
+	}()
+
+	conn, err := pool.getConnectionWithRetry()
+	if err != nil {
+		setError(err, errPtr)
+		return
+	}
+
+	ctx := context.Background()
+	_, err = conn.ExecContext(ctx, C.GoString(query))
+	if err != nil {
+		conn.Close()
+		setError(err, errPtr)
+		return
+	}
+
+	pool.returnConnection(conn)
 }
 
 //export GodbcQuery
@@ -579,6 +600,7 @@ func GodbcQueryWithParams(h C.godbc_handle_t, query *C.char, params **C.char, pa
 			handles[h] = &queryResult{
 				rows: rows,
 				conn: conn,
+				pool: pool,
 			}
 			return C.godbc_handle_t(h)
 		}
@@ -1051,6 +1073,10 @@ func removeHandle(h Handle) {
 	mu.Lock()
 	defer mu.Unlock()
 	delete(handles, h)
+}
+
+func setError(err error, errPtr **C.char) {
+	*errPtr = C.CString(err.Error())
 }
 
 func main() {
