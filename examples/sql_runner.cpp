@@ -142,7 +142,10 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
                 } catch (const std::exception& e) {
                     metrics.failedQueries++;
                     std::cerr << "[Thread " << threadId << "] Error executing SQL from " << sqlFile << ": " << e.what() << std::endl;
-                }
+                } catch (...) {
+                    metrics.failedQueries++;
+                    std::cerr << "[Thread " << threadId << "] Unknown error executing SQL from " << sqlFile << std::endl;
+                }   
                 
                 metrics.totalQueries++;
             }
