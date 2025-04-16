@@ -15,6 +15,7 @@ namespace fs = std::experimental::filesystem;
 #include <atomic>
 #include <iomanip>
 #include <sstream>
+#include <limits>
 
 struct Metrics {
     std::atomic<uint64_t> totalQueries{0};
@@ -23,6 +24,10 @@ struct Metrics {
     std::atomic<uint64_t> totalExecutionTime{0};
     std::atomic<uint64_t> totalConnectionTime{0};
     std::atomic<uint64_t> totalConnections{0};
+    std::atomic<uint64_t> minQueryTime{std::numeric_limits<uint64_t>::max()};
+    std::atomic<uint64_t> maxQueryTime{0};
+    std::atomic<uint64_t> minConnectionTime{std::numeric_limits<uint64_t>::max()};
+    std::atomic<uint64_t> maxConnectionTime{0};
     std::atomic<bool> shouldStop{false};
     mutable std::mutex printMutex;
 };
@@ -48,8 +53,10 @@ void printMetrics(const Metrics& metrics, const Config& config, const std::chron
               << progress << "% | "
               << "Success: " << metrics.successfulQueries << " | "
               << "Errors: " << metrics.failedQueries << " | "
-              << "Avg Query Time: " << (metrics.totalExecutionTime / metrics.totalQueries) << "ms | "
-              << "Avg Conn Time: " << (metrics.totalConnectionTime / metrics.totalConnections) << "ms | "
+              << "Query Time: " << (metrics.totalExecutionTime / metrics.totalQueries) << "ms (min: " 
+              << metrics.minQueryTime << "ms, max: " << metrics.maxQueryTime << "ms) | "
+              << "Conn Time: " << (metrics.totalConnectionTime / metrics.totalConnections) << "ms (min: "
+              << metrics.minConnectionTime << "ms, max: " << metrics.maxConnectionTime << "ms) | "
               << "QPS: " << (metrics.totalQueries * 1000.0 / elapsed.count())
               << std::flush;
 }
@@ -97,6 +104,20 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
             auto connTime = std::chrono::duration_cast<std::chrono::milliseconds>(connEnd - start);
             metrics.totalConnectionTime += connTime.count();
             
+            // Update min/max connection times
+            uint64_t currentConnTime = connTime.count();
+            uint64_t currentMin;
+            do {
+                currentMin = metrics.minConnectionTime;
+            } while (currentConnTime < currentMin && 
+                    !metrics.minConnectionTime.compare_exchange_weak(currentMin, currentConnTime));
+            
+            uint64_t currentMax;
+            do {
+                currentMax = metrics.maxConnectionTime;
+            } while (currentConnTime > currentMax && 
+                    !metrics.maxConnectionTime.compare_exchange_weak(currentMax, currentConnTime));
+
             if (config.verbose) {
                 std::cout << "[Thread " << threadId << "] Connected successfully in " << connTime.count() << "ms" << std::endl;
             }
@@ -128,6 +149,20 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
                     metrics.totalExecutionTime += queryTime.count();
                     metrics.successfulQueries++;
                     
+                    // Update min/max query times
+                    uint64_t currentQueryTime = queryTime.count();
+                    uint64_t currentMin;
+                    do {
+                        currentMin = metrics.minQueryTime;
+                    } while (currentQueryTime < currentMin && 
+                            !metrics.minQueryTime.compare_exchange_weak(currentMin, currentQueryTime));
+                    
+                    uint64_t currentMax;
+                    do {
+                        currentMax = metrics.maxQueryTime;
+                    } while (currentQueryTime > currentMax && 
+                            !metrics.maxQueryTime.compare_exchange_weak(currentMax, currentQueryTime));
+                    
                     if (config.verbose) {
                         std::cout << "[Thread " << threadId << "] Query completed in " << queryTime.count() << "ms" << std::endl;
                     }
@@ -136,7 +171,30 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
                         if (config.verbose) {
                             std::cout << "[Thread " << threadId << "] Sleeping for " << config.delayMs << "ms" << std::endl;
                         }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(config.delayMs));
+                        
+                        // Print metrics before sleep
+                        std::cout << "\nAfter query " << metrics.totalQueries << ":\n"
+                                  << "  Query times (ms): min=" << metrics.minQueryTime 
+                                  << ", avg=" << (metrics.totalExecutionTime / metrics.totalQueries)
+                                  << ", max=" << metrics.maxQueryTime << "\n"
+                                  << "  Connection times (ms): min=" << metrics.minConnectionTime
+                                  << ", avg=" << (metrics.totalConnectionTime / metrics.totalConnections)
+                                  << ", max=" << metrics.maxConnectionTime << "\n";
+                        
+                        // Handle large sleep times by breaking them into smaller chunks
+                        int remainingSleep = config.delayMs;
+                        const int maxSleepChunk = 1000; // 1 second chunks
+                        
+                        while (remainingSleep > 0) {
+                            int sleepChunk = std::min(remainingSleep, maxSleepChunk);
+                            std::this_thread::sleep_for(std::chrono::milliseconds(sleepChunk));
+                            remainingSleep -= sleepChunk;
+                            
+                            // Check if we should stop during sleep
+                            if (metrics.shouldStop) {
+                                break;
+                            }
+                        }
                     }
                     
                 } catch (const std::exception& e) {
@@ -190,7 +248,22 @@ int main(int argc, char* argv[]) {
         } else if (arg == "-i") {
             config.infinite = true;
         } else if (arg == "-s" && i + 1 < argc) {
-            config.delayMs = std::stoi(argv[++i]);
+            try {
+                // Use long long to handle large sleep values
+                long long sleepMs = std::stoll(argv[++i]);
+                if (sleepMs < 0) {
+                    std::cerr << "Error: Sleep time cannot be negative" << std::endl;
+                    return 1;
+                }
+                if (sleepMs > std::numeric_limits<int>::max()) {
+                    std::cerr << "Error: Sleep time too large (max: " << std::numeric_limits<int>::max() << "ms)" << std::endl;
+                    return 1;
+                }
+                config.delayMs = static_cast<int>(sleepMs);
+            } catch (const std::exception& e) {
+                std::cerr << "Error parsing sleep time: " << e.what() << std::endl;
+                return 1;
+            }
         } else if (arg == "-r" && i + 1 < argc) {
             config.reportIntervalMs = std::stoi(argv[++i]);
         } else if (arg == "-v") {
@@ -267,8 +340,14 @@ int main(int argc, char* argv[]) {
               << "Total time: " << totalTime.count() << "ms\n"
               << "Successful queries: " << metrics.successfulQueries << "\n"
               << "Failed queries: " << metrics.failedQueries << "\n"
-              << "Average query time: " << (metrics.totalExecutionTime / metrics.totalQueries) << "ms\n"
-              << "Average connection time: " << (metrics.totalConnectionTime / metrics.totalConnections) << "ms\n"
+              << "Query times (ms):\n"
+              << "  Average: " << (metrics.totalExecutionTime / metrics.totalQueries) << "\n"
+              << "  Minimum: " << metrics.minQueryTime << "\n"
+              << "  Maximum: " << metrics.maxQueryTime << "\n"
+              << "Connection times (ms):\n"
+              << "  Average: " << (metrics.totalConnectionTime / metrics.totalConnections) << "\n"
+              << "  Minimum: " << metrics.minConnectionTime << "\n"
+              << "  Maximum: " << metrics.maxConnectionTime << "\n"
               << "Queries per second: " << (metrics.totalQueries * 1000.0 / totalTime.count()) << "\n";
     
     return 0;
