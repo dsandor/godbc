@@ -16,6 +16,8 @@ namespace fs = std::experimental::filesystem;
 #include <iomanip>
 #include <sstream>
 #include <limits>
+#include <cstdlib>
+#include <cstring>
 
 struct Metrics {
     std::atomic<uint64_t> totalQueries{0};
@@ -86,6 +88,9 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
     }
 
     int iteration = 0;
+    int consecutiveErrors = 0;
+    const int maxConsecutiveErrors = 5;
+    
     while (!metrics.shouldStop && (config.infinite || iteration < config.iterations)) {
         if (config.verbose) {
             std::cout << "[Thread " << threadId << "] Starting iteration " << (iteration + 1) << std::endl;
@@ -97,7 +102,33 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
             if (config.verbose) {
                 std::cout << "[Thread " << threadId << "] Getting connection from pool..." << std::endl;
             }
-            auto conn = godbc::ConnectionPool::getConnection(config.connectionString);
+            
+            // Add retry logic for connection failures
+            godbc::Connection conn;
+            int retryCount = 0;
+            const int maxRetries = 3;
+            
+            while (retryCount < maxRetries) {
+                try {
+                    conn = godbc::ConnectionPool::getConnection(config.connectionString);
+                    break; // Success, exit retry loop
+                } catch (const std::exception& e) {
+                    retryCount++;
+                    if (retryCount >= maxRetries) {
+                        throw; // Re-throw if we've exhausted retries
+                    }
+                    
+                    // Wait before retrying, with exponential backoff
+                    int backoffMs = 100 * (1 << (retryCount - 1));
+                    if (config.verbose) {
+                        std::cout << "[Thread " << threadId << "] Connection failed, retrying in " 
+                                  << backoffMs << "ms (attempt " << retryCount << "/" << maxRetries << "): " 
+                                  << e.what() << std::endl;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
+                }
+            }
+            
             metrics.totalConnections++;
             
             auto connEnd = std::chrono::high_resolution_clock::now();
@@ -121,6 +152,9 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
             if (config.verbose) {
                 std::cout << "[Thread " << threadId << "] Connected successfully in " << connTime.count() << "ms" << std::endl;
             }
+            
+            // Reset consecutive errors counter on successful connection
+            consecutiveErrors = 0;
             
             // Execute each SQL file
             for (const auto& sqlFile : sqlFiles) {
@@ -215,6 +249,14 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
             
         } catch (const std::exception& e) {
             std::cerr << "[Thread " << threadId << "] Thread error: " << e.what() << std::endl;
+            consecutiveErrors++;
+            
+            // If we've had too many consecutive errors, pause this thread to allow system resources to be freed
+            if (consecutiveErrors >= maxConsecutiveErrors) {
+                std::cerr << "[Thread " << threadId << "] Too many consecutive errors, pausing for 30 seconds to allow system resources to be freed" << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(30));
+                consecutiveErrors = 0;
+            }
         }
         
         iteration++;
@@ -349,6 +391,21 @@ int main(int argc, char* argv[]) {
               << "  Minimum: " << metrics.minConnectionTime << "\n"
               << "  Maximum: " << metrics.maxConnectionTime << "\n"
               << "Queries per second: " << (metrics.totalQueries * 1000.0 / totalTime.count()) << "\n";
+    
+    // Check and increase file descriptor limits if possible
+    struct rlimit rlim;
+    if (getrlimit(RLIMIT_NOFILE, &rlim) == 0) {
+        if (rlim.rlim_cur < rlim.rlim_max) {
+            rlim.rlim_cur = rlim.rlim_max;
+            if (setrlimit(RLIMIT_NOFILE, &rlim) == 0) {
+                std::cout << "Increased file descriptor limit to " << rlim.rlim_cur << std::endl;
+            } else {
+                std::cerr << "Warning: Could not increase file descriptor limit: " << strerror(errno) << std::endl;
+            }
+        }
+    } else {
+        std::cerr << "Warning: Could not get file descriptor limit: " << strerror(errno) << std::endl;
+    }
     
     return 0;
 } 
