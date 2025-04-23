@@ -104,13 +104,14 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
             }
             
             // Add retry logic for connection failures
-            godbc::Connection conn;
+            godbc::Connection conn = godbc::ConnectionPool::getConnection(config.connectionString);
             int retryCount = 0;
             const int maxRetries = 3;
             
             while (retryCount < maxRetries) {
                 try {
-                    conn = godbc::ConnectionPool::getConnection(config.connectionString);
+                    // Test the connection
+                    conn.execute("SELECT 1");
                     break; // Success, exit retry loop
                 } catch (const std::exception& e) {
                     retryCount++;
@@ -126,6 +127,9 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
                                   << e.what() << std::endl;
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
+                    
+                    // Get a new connection
+                    conn = godbc::ConnectionPool::getConnection(config.connectionString);
                 }
             }
             

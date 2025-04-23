@@ -126,6 +126,27 @@ func (p *Pool) getConnectionWithRetry() (*sql.Conn, error) {
 		// Test the connection
 		err := conn.PingContext(context.Background())
 		if err == nil {
+			// Create a new connection to maintain the minimum if needed
+			if len(p.connections) < p.minConns {
+				go func() {
+					p.mu.Lock()
+					defer p.mu.Unlock()
+					for i := 0; i < p.retryAttempts; i++ {
+						newConn, err := p.db.Conn(context.Background())
+						if err == nil {
+							err = newConn.PingContext(context.Background())
+							if err == nil {
+								p.connections = append(p.connections, newConn)
+								return
+							}
+							newConn.Close()
+						}
+						if i < p.retryAttempts-1 {
+							time.Sleep(p.retryDelay)
+						}
+					}
+				}()
+			}
 			return conn, nil
 		}
 
@@ -222,21 +243,19 @@ func (p *Pool) returnConnection(conn *sql.Conn) {
 	err := conn.PingContext(context.Background())
 	if err != nil {
 		conn.Close()
-		// If we're below minimum connections, create a new one
-		if len(p.connections) < p.minConns {
-			for i := 0; i < p.retryAttempts; i++ {
-				newConn, err := p.db.Conn(context.Background())
+		// Create a new connection to maintain the minimum
+		for i := 0; i < p.retryAttempts; i++ {
+			newConn, err := p.db.Conn(context.Background())
+			if err == nil {
+				err = newConn.PingContext(context.Background())
 				if err == nil {
-					err = newConn.PingContext(context.Background())
-					if err == nil {
-						p.connections = append(p.connections, newConn)
-						break
-					}
-					newConn.Close()
+					p.connections = append(p.connections, newConn)
+					break
 				}
-				if i < p.retryAttempts-1 {
-					time.Sleep(p.retryDelay)
-				}
+				newConn.Close()
+			}
+			if i < p.retryAttempts-1 {
+				time.Sleep(p.retryDelay)
 			}
 		}
 		return
@@ -351,13 +370,13 @@ func GodbcConnect(connStr *C.char, minConns, maxConns C.int, connTimeoutMs, retr
 
 	pool := &Pool{
 		db:                db,
-		minConns:         int(minConns),
-		maxConns:         int(maxConns),
-		connTimeout:      connTimeout,
-		retryDelay:       retryDelay,
-		retryAttempts:    int(retryAttempts),
+		minConns:          int(minConns),
+		maxConns:          int(maxConns),
+		connTimeout:       connTimeout,
+		retryDelay:        retryDelay,
+		retryAttempts:     int(retryAttempts),
 		networkRetryDelay: networkRetryDelay,
-		verboseLogging:   verboseLogging != 0,
+		verboseLogging:    verboseLogging != 0,
 	}
 
 	// Set connection pool settings
@@ -385,16 +404,7 @@ func GodbcClose(h C.godbc_handle_t, errPtr **C.char) {
 	if obj, exists := handles[handle]; exists {
 		switch v := obj.(type) {
 		case *Pool:
-			// Close all connections in the pool
-			v.mu.Lock()
-			for _, conn := range v.connections {
-				conn.Close()
-			}
-			v.connections = nil
-			v.db.Close()
-			v.mu.Unlock()
-
-			// Remove from connPool if this is the last handle for this pool
+			// Only close the pool if this is the last handle
 			var hasOtherHandles bool
 			for h2, obj2 := range handles {
 				if h2 != handle {
@@ -405,6 +415,15 @@ func GodbcClose(h C.godbc_handle_t, errPtr **C.char) {
 				}
 			}
 			if !hasOtherHandles {
+				v.mu.Lock()
+				for _, conn := range v.connections {
+					conn.Close()
+				}
+				v.connections = nil
+				v.db.Close()
+				v.mu.Unlock()
+
+				// Remove from connPool
 				for connStr, pool := range connPool {
 					if pool == v {
 						delete(connPool, connStr)
