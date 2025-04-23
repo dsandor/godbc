@@ -18,6 +18,10 @@ namespace fs = std::experimental::filesystem;
 #include <limits>
 #include <cstdlib>
 #include <cstring>
+// Add system resource limit headers for Linux
+#ifdef __linux__
+#include <sys/resource.h>
+#endif
 
 struct Metrics {
     std::atomic<uint64_t> totalQueries{0};
@@ -39,7 +43,7 @@ struct Config {
     std::string sqlDir;
     int numThreads;
     int iterations;
-    int delayMs;
+    long long delayMs;
     bool infinite;
     int reportIntervalMs;
     bool verbose;
@@ -220,11 +224,11 @@ void runQueries(const Config& config, int threadId, Metrics& metrics) {
                                   << ", max=" << metrics.maxConnectionTime << "\n";
                         
                         // Handle large sleep times by breaking them into smaller chunks
-                        int remainingSleep = config.delayMs;
-                        const int maxSleepChunk = 1000; // 1 second chunks
+                        long long remainingSleep = config.delayMs;
+                        const long long maxSleepChunk = 1000; // 1 second chunks
                         
                         while (remainingSleep > 0) {
-                            int sleepChunk = std::min(remainingSleep, maxSleepChunk);
+                            long long sleepChunk = std::min(remainingSleep, maxSleepChunk);
                             std::this_thread::sleep_for(std::chrono::milliseconds(sleepChunk));
                             remainingSleep -= sleepChunk;
                             
@@ -305,7 +309,7 @@ int main(int argc, char* argv[]) {
                     std::cerr << "Error: Sleep time too large (max: " << std::numeric_limits<int>::max() << "ms)" << std::endl;
                     return 1;
                 }
-                config.delayMs = static_cast<int>(sleepMs);
+                config.delayMs = sleepMs;
             } catch (const std::exception& e) {
                 std::cerr << "Error parsing sleep time: " << e.what() << std::endl;
                 return 1;
@@ -397,6 +401,7 @@ int main(int argc, char* argv[]) {
               << "Queries per second: " << (metrics.totalQueries * 1000.0 / totalTime.count()) << "\n";
     
     // Check and increase file descriptor limits if possible
+    #ifdef __linux__
     struct rlimit rlim;
     if (getrlimit(RLIMIT_NOFILE, &rlim) == 0) {
         if (rlim.rlim_cur < rlim.rlim_max) {
@@ -410,6 +415,7 @@ int main(int argc, char* argv[]) {
     } else {
         std::cerr << "Warning: Could not get file descriptor limit: " << strerror(errno) << std::endl;
     }
+    #endif
     
     return 0;
 } 
